@@ -412,6 +412,9 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               };
               const ticketCodeOf = row => String(pick(row, 'code','Code','requestCode','RequestCode','caseCode','CaseCode') || '').trim();
               const assigneeOf = row => numberOf(pick(row, 'staffId','StaffId','agentId','AgentId','assigneeId','AssigneeId','ASSIGNEE_ID'));
+              const claimIdOf = row => pick(row, 'assignId','assignID','assignmentId','AssignmentId','assignmentID',
+                'requestAssignId','RequestAssignId','requestAssignID','strID','intID','requestID','RequestID','requestId',
+                'id','Id','ID','ticketId','TicketId');
               const statusOf = row => {
                 const numeric = numberOf(pick(row, 'status','Status','statusId','StatusId','STATUS_ID'));
                 if (numeric !== null) return numeric;
@@ -474,46 +477,80 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 if ([5, 7, 8].includes(currentStatus))
                   return JSON.stringify({ status: 'NotClaimable', message: `${code} đã kết thúc, không thể nhận.` });
 
-                const ticketId = pick(before.row, 'id','Id','ticketId','TicketId','ID');
-                if (!ticketId)
-                  return JSON.stringify({ status: 'NotFound', message: `Không đọc được ID của ${code}.` });
-                const payload = { input: { id_Ticket: ticketId, creator: globalThis.Username,
-                  staff_ID: globalThis.userID, staffName: globalThis.Username,
-                  departmentName: globalThis.DepartmentName, department_ID: globalThis.UserDept,
-                  createDate: Date.now(), type: 2, code, ticketStatus: 2 }, type: 2 };
+                const ticketId = String(claimIdOf(before.row) || '').trim();
+                if (!/^\d{1,20}$/.test(ticketId))
+                  return JSON.stringify({ status: 'NotFound', message: `Không đọc được ID nhận hợp lệ của ${code}.` });
+
+                const readAntiForgeryToken = root => String(
+                  root?.querySelector('input[name="__RequestVerificationToken"], input[name="RequestVerificationToken"]')?.value ||
+                  root?.querySelector('meta[name="__RequestVerificationToken"], meta[name="request-verification-token"], meta[name="csrf-token"]')?.getAttribute('content') || '').trim();
+                let antiForgeryToken = '';
+                try {
+                  const homeResponse = await fetch('/ihub/', { credentials: 'same-origin', cache: 'no-store' });
+                  if (/\/id\/login|\/adfs\//i.test(new URL(homeResponse.url).pathname))
+                    return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
+                  if (homeResponse.ok) {
+                    const homeHtml = await homeResponse.text();
+                    const homeDocument = new DOMParser().parseFromString(homeHtml, 'text/html');
+                    antiForgeryToken = readAntiForgeryToken(homeDocument);
+                  }
+                } catch { }
+                antiForgeryToken ||= readAntiForgeryToken(document);
+
+                const body = new URLSearchParams();
+                body.append('input[id_Ticket]', ticketId);
+                body.append('input[creator]', String(globalThis.Username));
+                body.append('input[staff_ID]', String(globalThis.userID));
+                body.append('input[staffName]', String(globalThis.Username));
+                body.append('input[departmentName]', String(globalThis.DepartmentName || ''));
+                body.append('input[department_ID]', String(globalThis.UserDept || ''));
+                body.append('input[createDate]', String(Date.now()));
+                body.append('input[type]', '2');
+                body.append('input[code]', code);
+                body.append('input[ticketStatus]', '2');
+                body.append('type', '2');
+                if (antiForgeryToken) body.append('__RequestVerificationToken', antiForgeryToken);
+
+                const headers = {
+                  'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                  'X-Requested-With': 'XMLHttpRequest'
+                };
+                if (antiForgeryToken) {
+                  headers.Antiforgerykeyheader = antiForgeryToken;
+                  headers.RequestVerificationToken = antiForgeryToken;
+                  headers.__RequestVerificationToken = antiForgeryToken;
+                }
+
+                let serverAccepted = false;
                 let serverMessage = '';
                 try {
                   const response = await fetch(claimEndpoint, {
-                    method: 'POST', credentials: 'same-origin',
-                    headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' },
-                    body: JSON.stringify(payload)
+                    method: 'POST', credentials: 'same-origin', cache: 'no-store',
+                    headers, body: body.toString()
                   });
                   if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
                     return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
                   const text = await response.text();
+                  let parsed = null;
                   if (text) {
-                    try {
-                      const parsed = JSON.parse(text);
-                      serverMessage = String(parsed?.message ?? parsed?.Message ?? parsed?.error ?? parsed?.Error ?? '');
-                    } catch { serverMessage = text.slice(0, 200); }
+                    try { parsed = JSON.parse(text); }
+                    catch { serverMessage = text.slice(0, 200); }
                   }
+                  serverMessage = String(parsed?.message?.value ?? parsed?.message ?? parsed?.Message ??
+                    parsed?.error ?? parsed?.Error ?? serverMessage);
+                  serverAccepted = response.ok && Boolean(parsed &&
+                    (parsed.result === true || parsed.result === 1 ||
+                      /^(true|1)$/i.test(String(parsed.result ?? '')) ||
+                      String(parsed.status ?? '').toLowerCase() === 'ok'));
+                  if (!response.ok && !serverMessage) serverMessage = `FTMS HTTP ${response.status}`;
                 } catch (error) { serverMessage = String(error); }
 
-                for (const delay of [250, 750, 1500, 2500]) {
-                  await new Promise(resolve => setTimeout(resolve, delay));
-                  const after = await findTicket();
-                  if (after.authenticationRequired)
-                    return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
-                  if (after.retryableFailure) continue;
-                  if (!after.row) continue;
-                  const owner = assigneeOf(after.row);
-                  if (owner === expectedUserId)
-                    return JSON.stringify({ status: 'Claimed', message: `Đã nhận ${code} trên FTMS.` });
-                  if (owner && owner !== expectedUserId)
-                    return JSON.stringify({ status: 'OwnedByAnotherUser', message: `${code} đã được người khác nhận.` });
-                }
-                return JSON.stringify({ status: 'RetryableFailure',
-                  message: serverMessage || `FTMS chưa xác nhận ${code} đã được nhận.` });
+                if (!serverAccepted)
+                  return JSON.stringify({ status: 'RetryableFailure',
+                    message: serverMessage || `FTMS từ chối lệnh nhận ${code}.` });
+
+                return JSON.stringify({ status: 'Claimed',
+                  message: serverMessage || `Đã nhận ${code} trên FTMS.` });
               } catch (error) {
                 return JSON.stringify({ status: 'RetryableFailure', message: String(error) });
               }
