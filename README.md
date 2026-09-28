@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.9`
+- **Phiên bản:** `1.0.10`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -80,7 +80,8 @@
   - Kỹ thuật viên nhấn `[🙋 Nhận ticket]` trên ứng dụng Telegram điện thoại hoặc máy tính.
   - Background receiver (`TelegramCallbackReceiver`) lắng nghe webhook/getUpdates từ Telegram, xác thực chat ID hợp lệ.
   - Gọi ngầm API FTMS `TakeAndAssignmentV12` để nhận ticket về tài khoản FTMS của kỹ thuật viên.
-  - Cập nhật lại giao diện tin nhắn Telegram: ẩn nút nhận và gửi thông báo xác nhận thành công (*"Đã nhận RQ... trên FTMS"*).
+  - Sau khi nhận RQ thành công, tự gọi `ChangeStatus` để chuyển ticket sang **Tạm ngưng / Pending Customer** với ghi chú **“Hỗ trợ KH”**.
+  - Chỉ xác nhận và bỏ nút nhận trên Telegram sau khi toàn bộ luồng hoàn tất; lỗi đổi trạng thái được giữ lại để thử lại an toàn.
 
 ### 2.6. Hỗ trợ Proxy doanh nghiệp cho Telegram
 - Cho phép cấu hình HTTP Proxy riêng cho Telegram (`http://host:port`) mà không làm ảnh hưởng đến đường truyền nội bộ của FTMS trong WebView2.
@@ -296,7 +297,7 @@ Bảng `notification_outbox` đặt ràng buộc `UNIQUE(event_key)`. Nếu sự
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.9.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.10.exe`.
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 

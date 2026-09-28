@@ -420,7 +420,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 if (numeric !== null) return numeric;
                 const name = String(pick(row, 'statusName','StatusName','statusText','StatusText') || '')
                   .trim().toLocaleLowerCase('vi-VN');
-                return { 'đóng': 5, 'đã đóng': 5, 'closed': 5, 'hủy': 7, 'đã hủy': 7,
+                return { 'mới': 0, 'tạo mới': 0, 'new': 0, 'phân công': 1, 'assigned': 1,
+                  'đang thực hiện': 2, 'đang xử lý': 2, 'in progress': 2,
+                  'hoàn thành': 3, 'completed': 3, 'tạm ngưng': 4, 'paused': 4,
+                  'đóng': 5, 'đã đóng': 5, 'closed': 5, 'hủy': 7, 'đã hủy': 7,
                   'cancelled': 7, 'không xử lý': 8 }[name] ?? null;
               };
               const findTicket = async () => {
@@ -470,7 +473,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   return JSON.stringify({ status: 'NotFound', message: `Không tìm thấy ${code} trên FTMS.` });
                 const currentOwner = assigneeOf(before.row);
                 const currentStatus = statusOf(before.row);
-                if (currentOwner === expectedUserId)
+                const alreadyOwnedInProgress = currentOwner === expectedUserId && currentStatus === 2;
+                if (currentOwner === expectedUserId && !alreadyOwnedInProgress)
                   return JSON.stringify({ status: 'AlreadyOwnedByCurrentUser', message: `${code} đã được nhận bởi tài khoản hiện tại.` });
                 if (currentOwner && currentOwner !== expectedUserId)
                   return JSON.stringify({ status: 'OwnedByAnotherUser', message: `${code} đã được người khác nhận.` });
@@ -521,33 +525,86 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   headers.__RequestVerificationToken = antiForgeryToken;
                 }
 
-                let serverAccepted = false;
+                let serverAccepted = alreadyOwnedInProgress;
                 let serverMessage = '';
-                try {
-                  const response = await fetch(claimEndpoint, {
-                    method: 'POST', credentials: 'same-origin', cache: 'no-store',
-                    headers, body: body.toString()
-                  });
-                  if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
-                    return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
-                  const text = await response.text();
-                  let parsed = null;
-                  if (text) {
-                    try { parsed = JSON.parse(text); }
-                    catch { serverMessage = text.slice(0, 200); }
-                  }
-                  serverMessage = String(parsed?.message?.value ?? parsed?.message ?? parsed?.Message ??
-                    parsed?.error ?? parsed?.Error ?? serverMessage);
-                  serverAccepted = response.ok && Boolean(parsed &&
-                    (parsed.result === true || parsed.result === 1 ||
-                      /^(true|1)$/i.test(String(parsed.result ?? '')) ||
-                      String(parsed.status ?? '').toLowerCase() === 'ok'));
-                  if (!response.ok && !serverMessage) serverMessage = `FTMS HTTP ${response.status}`;
-                } catch (error) { serverMessage = String(error); }
+                if (!alreadyOwnedInProgress) {
+                  try {
+                    const response = await fetch(claimEndpoint, {
+                      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+                      headers, body: body.toString()
+                    });
+                    if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
+                      return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
+                    const text = await response.text();
+                    let parsed = null;
+                    if (text) {
+                      try { parsed = JSON.parse(text); }
+                      catch { serverMessage = text.slice(0, 200); }
+                    }
+                    serverMessage = String(parsed?.message?.value ?? parsed?.message ?? parsed?.Message ??
+                      parsed?.error ?? parsed?.Error ?? serverMessage);
+                    serverAccepted = response.ok && Boolean(parsed &&
+                      (parsed.result === true || parsed.result === 1 ||
+                        /^(true|1)$/i.test(String(parsed.result ?? '')) ||
+                        String(parsed.status ?? '').toLowerCase() === 'ok'));
+                    if (!response.ok && !serverMessage) serverMessage = `FTMS HTTP ${response.status}`;
+                  } catch (error) { serverMessage = String(error); }
 
-                if (!serverAccepted)
-                  return JSON.stringify({ status: 'RetryableFailure',
-                    message: serverMessage || `FTMS từ chối lệnh nhận ${code}.` });
+                  if (!serverAccepted)
+                    return JSON.stringify({ status: 'RetryableFailure',
+                      message: serverMessage || `FTMS từ chối lệnh nhận ${code}.` });
+                }
+
+                if (!isCase) {
+                  const changeStatusBody = new URLSearchParams({
+                    deptId: String(globalThis.UserDept || ''),
+                    staffId: String(globalThis.userID),
+                    departmentName: String(globalThis.DepartmentName || ''),
+                    staffName: String(globalThis.Username),
+                    department: String(globalThis.Department || globalThis.DepartmentCode ||
+                      globalThis.DeptCode || globalThis.UserDepartmentCode || ''),
+                    status: '4',
+                    reasonId: '',
+                    statusChangeId: '2',
+                    statusChangeNote: 'Hỗ trợ KH',
+                    id: ticketId,
+                    oldStatus: '2',
+                    code,
+                    type: '10'
+                  });
+                  let statusMessage = '';
+                  try {
+                    const statusResponse = await fetch('/ihub/Request/ChangeStatus', {
+                      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+                      headers, body: changeStatusBody.toString()
+                    });
+                    if (/\/id\/login|\/adfs\//i.test(new URL(statusResponse.url).pathname))
+                      return JSON.stringify({ status: 'RetryableFailure',
+                        message: `Đã nhận ${code}, nhưng phiên FTMS hết hạn khi chuyển sang Pending Customer.` });
+                    const statusText = await statusResponse.text();
+                    let statusResult = null;
+                    if (statusText) {
+                      try { statusResult = JSON.parse(statusText); }
+                      catch { statusMessage = statusText.slice(0, 200); }
+                    }
+                    statusMessage = String(statusResult?.message?.value ?? statusResult?.message ?? statusResult?.Message ??
+                      statusResult?.error ?? statusResult?.Error ?? statusMessage);
+                    const statusAccepted = statusResponse.ok && Boolean(statusResult &&
+                      (Number(statusResult.code) === 200 || Number(statusResult.status) === 200 ||
+                        statusResult.result === true || statusResult.result === 1 ||
+                        /^(true|1)$/i.test(String(statusResult.result ?? '')) ||
+                        statusResult.success === true || String(statusResult.status ?? '').toLowerCase() === 'ok' ||
+                        /cập nhật thành công/i.test(statusMessage)));
+                    if (!statusAccepted)
+                      return JSON.stringify({ status: 'RetryableFailure',
+                        message: statusMessage || `Đã nhận ${code}, nhưng FTMS từ chối chuyển sang Pending Customer.` });
+                  } catch (error) {
+                    return JSON.stringify({ status: 'RetryableFailure',
+                      message: `Đã nhận ${code}, nhưng chưa chuyển được sang Pending Customer: ${String(error)}` });
+                  }
+                  return JSON.stringify({ status: 'Claimed',
+                    message: statusMessage || `Đã nhận ${code} và chuyển sang Tạm ngưng / Pending Customer (Hỗ trợ KH).` });
+                }
 
                 return JSON.stringify({ status: 'Claimed',
                   message: serverMessage || `Đã nhận ${code} trên FTMS.` });
