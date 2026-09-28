@@ -210,15 +210,22 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 continue;
 
             // Durable guard cho reminder: mỗi milestone chỉ gửi 1 lần
+            string? ledgerType = null;
+            string? ledgerDisc = null;
             if (item.EventType == TicketEventType.UnassignedReminder)
             {
-                var disc = item.Reason; // discriminator đã có trong EventKey
-                var bucket = disc; // sẽ dùng ticket code + type + discriminator từ event
-                // Lấy discriminator từ EventKey hash - dùng lại logic: event key chứa discriminator
-                // Thay vào đó dùng trực tiếp reason chứa số phút
                 var minuteMatch = System.Text.RegularExpressions.Regex.Match(item.Reason, @"(\d+) phút");
-                var reminderDisc = minuteMatch.Success ? $"unassigned-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
-                if (await store.HasNotificationAsync(item.TicketCode, "UnassignedReminder", reminderDisc, cancellationToken))
+                ledgerType = "UnassignedReminder";
+                ledgerDisc = minuteMatch.Success ? $"unassigned-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
+                if (await store.HasNotificationAsync(item.TicketCode, ledgerType, ledgerDisc, cancellationToken))
+                    continue;
+            }
+            else if (item.EventType == TicketEventType.ResponseReminder)
+            {
+                var minuteMatch = System.Text.RegularExpressions.Regex.Match(item.Reason, @"(\d+) phút");
+                ledgerType = "ResponseReminder";
+                ledgerDisc = minuteMatch.Success ? $"response-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
+                if (await store.HasNotificationAsync(item.TicketCode, ledgerType, ledgerDisc, cancellationToken))
                     continue;
             }
 
@@ -231,12 +238,8 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             // Ghi vào ledger sau khi enqueue thành công
             if (item.EventType == TicketEventType.Created)
                 await store.RecordNotificationAsync(item.TicketCode, "Created", "", cancellationToken);
-            else if (item.EventType == TicketEventType.UnassignedReminder)
-            {
-                var minuteMatch = System.Text.RegularExpressions.Regex.Match(item.Reason, @"(\d+) phút");
-                var reminderDisc = minuteMatch.Success ? $"unassigned-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
-                await store.RecordNotificationAsync(item.TicketCode, "UnassignedReminder", reminderDisc, cancellationToken);
-            }
+            else if (ledgerType is not null && ledgerDisc is not null)
+                await store.RecordNotificationAsync(item.TicketCode, ledgerType, ledgerDisc, cancellationToken);
         }
 
         // 3. Batch save snapshots to SQLite in a single transaction

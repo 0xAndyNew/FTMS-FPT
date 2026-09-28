@@ -92,7 +92,7 @@ public sealed class TicketChangeDetector
             {
                 var responseMinutes = Math.Max(0, (int)(DateTimeOffset.Now - old.ResponseReminderSince.Value).TotalMinutes);
                 var responseBucket = responseMinutes / 5;
-                if (responseBucket >= 1)
+                if (responseBucket >= 1 && responseBucket <= 6) // Chỉ nhắc tối đa 6 mốc: 5, 10, 15, 20, 25, 30 phút
                 {
                     var email = await LatestEmailAsync();
                     var enriched = snapshot with
