@@ -351,7 +351,7 @@ Chạy script PowerShell đi kèm để tự động publish single-file và đ�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
-Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.8.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
+Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.11.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
 
 ---
 
@@ -369,7 +369,7 @@ dotnet test
 Test run for D:\FTMS-FPT\tests\FTMS.Companion.Tests\bin\Debug\net8.0\FTMS.Companion.Tests.dll (.NETCoreApp,Version=v8.0)
 A total of 1 test files matched the specified pattern.
 
-Passed!  - Failed: 0, Passed: 20, Skipped: 0, Total: 20, Duration: 155 ms
+Passed!  - Failed: 0, Passed: 25, Skipped: 0, Total: 25, Duration: 2 s
 ```
 
 ### Các nhóm kiểm thử chính:
