@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.8`
+- **Phiên bản:** `1.0.9`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -285,8 +285,8 @@ SHA-256("{TicketCode}|{EventType}|{PreviousStatus}|{CurrentStatus}|{EmailId}|{Di
 Bảng `notification_outbox` đặt ràng buộc `UNIQUE(event_key)`. Nếu sự kiện đã được lưu hoặc đang gửi, hệ thống tự động bỏ qua, bảo đảm không bao giờ xảy ra tình trạng spam tin nhắn.
 
 ### 6.5. Cảnh báo nhắc nhở & SLA (Reminders & SLA Logic)
-- **Nhắc ticket chưa nhận (`UnassignedReminder`):** Ticket ở trạng thái *Tạo mới* hoặc *Phân công* chưa có người nhận sẽ được gửi nhắc nhở sau mỗi chu kỳ 5 phút (`unassigned-1`, `unassigned-2`, ...).
-- **Nhắc ticket có phản hồi mới (`ResponseReminder`):** Ticket *Đang thực hiện* có email mới từ khách hàng mà chưa được phản hồi tiếp theo sẽ gửi nhắc sau mỗi 5 phút.
+- **Nhắc ticket chưa nhận (`UnassignedReminder`):** Ticket ở trạng thái *Tạo mới* hoặc *Phân công* chưa có người nhận sẽ được gửi nhắc nhở tối đa 6 mốc: **5, 10, 15, 20, 25, 30 phút** (`unassigned-1` đến `unassigned-6`), sau 30 phút dừng hoàn toàn.
+- **Nhắc ticket có phản hồi mới (`ResponseReminder`):** Ticket *Đang thực hiện* có email mới từ khách hàng mà chưa được phản hồi tiếp theo sẽ gửi nhắc tối đa 6 mốc: **5, 10, 15, 20, 25, 30 phút** (`response-1` đến `response-6`), sau 30 phút dừng hoàn toàn.
 - **Cảnh báo SLA (`SlaThresholdReached`):**
   - Cảnh báo sắp vi phạm tại các mốc: **5 phút**, **3 phút**, **1 phút** trước khi chạm hạn.
   - Cảnh báo vi phạm ngay khi `SlaType == 3` (quá hạn).
@@ -296,7 +296,7 @@ Bảng `notification_outbox` đặt ràng buộc `UNIQUE(event_key)`. Nếu sự
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.8.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.9.exe`.
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 
