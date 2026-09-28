@@ -155,42 +155,52 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 return sender;
               };
 
-              const fetchActive = async () => {
-                const body = new URLSearchParams({ take: '1000', skip: '0', page: '1', pageSize: '1000',
-                  search: '', isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
-                  alarmType: '0', isSortByDate: '' });
-                const request = await fetch('/ihub/request/GetListRequestV12', {
-                  method: 'POST',
-                  credentials: 'same-origin',
-                  headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'X-Requested-With': 'XMLHttpRequest' },
-                  body: body.toString()
-                });
-                if (/\/id\/login|\/adfs\//i.test(new URL(request.url).pathname))
-                  throw new Error('FTMS API HTTP 401');
-                if (!request.ok) throw new Error(`FTMS API HTTP ${request.status}`);
-                let rows = unwrap(await request.json());
+              const fetchActiveGroup = async (strStatus, isMyTicket) => {
+                const rows = [];
                 const pageSize = 1000;
-                for (let page = 2; rows.length >= (page - 1) * pageSize && page <= 5; page++) {
-                  const nextBody = new URLSearchParams({ take: String(pageSize), skip: String((page - 1) * pageSize),
-                    page: String(page), pageSize: String(pageSize), search: '', isMyTicket: '', isAkabot: '',
-                    strStatus: '', strRegionID: '', linkDeptId: '', alarmType: '0', isSortByDate: '' });
-                  try {
-                    const nextResponse = await fetch('/ihub/request/GetListRequestV12', {
-                      method: 'POST',
-                      credentials: 'same-origin',
-                      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                        'X-Requested-With': 'XMLHttpRequest' },
-                      body: nextBody.toString()
-                    });
-                    if (!nextResponse.ok) break;
-                    const nextRows = unwrap(await nextResponse.json());
-                    if (!nextRows.length) break;
-                    rows.push(...nextRows);
-                    if (nextRows.length < pageSize) break;
-                  } catch { break; }
+                for (let page = 1; page <= 5; page++) {
+                  const body = new URLSearchParams({ take: String(pageSize), skip: String((page - 1) * pageSize),
+                    page: String(page), pageSize: String(pageSize), search: '', isMyTicket: String(isMyTicket),
+                    isAkabot: 'false', strStatus, strRegionID: '0,2,1', linkDeptId: '', alarmType: '0',
+                    isSortByDate: 'true' });
+                  const response = await fetch('/ihub/request/GetListRequestV12', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                      'X-Requested-With': 'XMLHttpRequest' },
+                    body: body.toString()
+                  });
+                  if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
+                    throw new Error('FTMS API HTTP 401');
+                  if (!response.ok) throw new Error(`FTMS API HTTP ${response.status}`);
+                  const pageRows = unwrap(await response.json());
+                  rows.push(...pageRows);
+                  if (pageRows.length < pageSize) break;
                 }
-                return rows.map(row => ({
+                return rows;
+              };
+
+              const fetchActive = async () => {
+                const scopes = [
+                  ['1', false], ['2,4', false],
+                  ['1', true], ['2,4', true]
+                ];
+                const results = await Promise.allSettled(scopes.map(([statuses, mine]) =>
+                  fetchActiveGroup(statuses, mine)));
+                const rows = [];
+                const errors = [];
+                let anySuccess = false;
+                for (const result of results) {
+                  if (result.status === 'fulfilled') {
+                    anySuccess = true;
+                    rows.push(...result.value);
+                  } else {
+                    errors.push(String(result.reason?.message || result.reason || ''));
+                  }
+                }
+                if (!anySuccess) throw new Error(errors.join('; ') || 'Không thể đọc danh sách ticket FTMS');
+
+                const tickets = rows.map(row => ({
                   code: String(pick(row, 'code','Code','requestCode','RequestCode','REQUEST_CODE','REQUESTCODE','requestNo','RequestNo') || '').trim(),
                   status: statusOf(row),
                   title: pick(row, 'title','Title','subject','Subject','REQUEST_TITLE'),
@@ -214,6 +224,20 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       sentAt, from: sender, subject, body };
                   })()
                 })).filter(x => x.code && x.status !== null);
+
+                const completeness = ticket => [ticket.title, ticket.assigneeId, ticket.assigneeName,
+                  ticket.departmentId, ticket.departmentName, ticket.latestEmail].filter(Boolean).length;
+                const byCode = new Map();
+                for (const ticket of tickets) {
+                  const key = ticket.code.toLocaleUpperCase('vi-VN');
+                  const current = byCode.get(key);
+                  const candidateTime = ticket.updatedAt ? new Date(ticket.updatedAt).getTime() : Number.NEGATIVE_INFINITY;
+                  const currentTime = current?.updatedAt ? new Date(current.updatedAt).getTime() : Number.NEGATIVE_INFINITY;
+                  if (!current || candidateTime > currentTime ||
+                      candidateTime === currentTime && completeness(ticket) > completeness(current))
+                    byCode.set(key, ticket);
+                }
+                return Array.from(byCode.values());
               };
 
               const fetchHistory = async () => {

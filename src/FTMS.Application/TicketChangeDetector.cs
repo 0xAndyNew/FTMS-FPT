@@ -15,7 +15,8 @@ public sealed class TicketChangeDetector
             previous.TryGetValue(snapshot.Code, out var old);
             if (old is null)
             {
-                if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal)) continue;
+                if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
+                    snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused) continue;
                 var initialEmail = await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken);
                 var email = SelectEmail(initialEmail, snapshot.LatestEmail);
                 var enriched = snapshot with { LatestEmail = email };

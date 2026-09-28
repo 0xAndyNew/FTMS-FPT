@@ -157,6 +157,43 @@ public sealed class TicketMonitorTests
         try { await runTask; } catch (OperationCanceledException) { }
     }
 
+    [Fact]
+    public async Task ExistingPausedTicketIsBaselinedWithoutCreatedAlertAndEmitsStatusChangedWhenResumed()
+    {
+        var user = new CurrentUserIdentity(42, "hieu.user", null, null);
+        var initialPaused = new TicketSnapshot
+        {
+            Code = "RQ-EXISTING",
+            Status = TicketStatus.Paused,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 42,
+            AssigneeName = "hieu.user",
+            UpdatedAt = DateTimeOffset.UtcNow.AddMinutes(-10)
+        };
+        var client = new FakeFtmsClient(user, [initialPaused], []);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(store.SavedEvents, e => e.TicketCode == "RQ-EXISTING");
+
+        var resumedInProgress = initialPaused with
+        {
+            Status = TicketStatus.InProgress,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        client.CurrentTickets = [resumedInProgress];
+
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var transition = Assert.Single(store.SavedEvents, e => e.TicketCode == "RQ-EXISTING");
+        Assert.Equal(TicketEventType.StatusChanged, transition.EventType);
+        Assert.Equal(TicketStatus.Paused, transition.PreviousStatus);
+        Assert.Equal(TicketStatus.InProgress, transition.CurrentStatus);
+    }
+
     private static TicketSnapshot Closed(string code, DateTimeOffset closedAt, long? closedById,
         string? closedByName, long? assigneeId) => new()
     {
