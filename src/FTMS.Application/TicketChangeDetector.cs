@@ -76,7 +76,7 @@ public sealed class TicketChangeDetector
             {
                 var unassignedMinutes = Math.Max(0, (int)(DateTimeOffset.Now - snapshot.CreatedAt.Value).TotalMinutes);
                 var reminderBucket = unassignedMinutes / 5;
-                if (reminderBucket >= 1)
+                if (reminderBucket >= 1 && reminderBucket <= 6) // Chỉ nhắc tối đa 6 mốc: 5, 10, 15, 20, 25, 30 phút
                 {
                     var email = await LatestEmailAsync();
                     var enriched = snapshot with { LatestEmail = email };

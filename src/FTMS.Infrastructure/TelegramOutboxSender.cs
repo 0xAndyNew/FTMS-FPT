@@ -85,6 +85,8 @@ public sealed class TelegramOutboxSender(string databasePath, Func<(string Token
             {
                 var cleanup = connection.CreateCommand();
                 cleanup.Transaction = transaction;
+                // Xóa outbox, events, snapshots nhưng GIỮ LẠI notification_ledger
+                // để đảm bảo "TICKET MỚI" và reminder milestone không bị gửi lại
                 cleanup.CommandText = """
                     DELETE FROM notification_outbox WHERE event_key IN (
                         SELECT event_key FROM ticket_events WHERE ticket_code=$code

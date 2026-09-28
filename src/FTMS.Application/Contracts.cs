@@ -28,6 +28,8 @@ public interface ITicketStore
     Task EnqueueNotificationAsync(TicketEvent ticketEvent, string message, CancellationToken cancellationToken);
     Task SaveEventAndEnqueueNotificationAsync(TicketEvent ticketEvent, string? message, CancellationToken cancellationToken);
     Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken);
+    Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken);
+    Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken);
     Task CleanupAsync(int retentionDays, CancellationToken cancellationToken);
 }
 

@@ -244,6 +244,8 @@ public sealed class TicketMonitorTests
             return Task.CompletedTask;
         }
         public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task CleanupAsync(int retentionDays, CancellationToken cancellationToken)
         {
             CleanupCallCount++;

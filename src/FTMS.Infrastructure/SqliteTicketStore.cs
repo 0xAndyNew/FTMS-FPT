@@ -22,6 +22,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             CREATE TABLE IF NOT EXISTS ticket_snapshots(code TEXT PRIMARY KEY,payload TEXT NOT NULL,is_terminal INTEGER NOT NULL,updated_at TEXT NOT NULL,terminal_at TEXT NULL);
             CREATE TABLE IF NOT EXISTS ticket_events(event_key TEXT PRIMARY KEY,ticket_code TEXT NOT NULL,event_type TEXT NOT NULL,payload TEXT NOT NULL,detected_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS notification_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT NOT NULL UNIQUE,message TEXT NOT NULL,attempt_count INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,sent_at TEXT NULL,last_error TEXT NULL);
+            CREATE TABLE IF NOT EXISTS notification_ledger(ticket_code TEXT NOT NULL,notification_type TEXT NOT NULL,discriminator TEXT NOT NULL DEFAULT '',sent_at TEXT NOT NULL,PRIMARY KEY(ticket_code,notification_type,discriminator));
             CREATE INDEX IF NOT EXISTS idx_ticket_events_code ON ticket_events(ticket_code);
             CREATE INDEX IF NOT EXISTS idx_ticket_events_detected ON ticket_events(detected_at);
             CREATE INDEX IF NOT EXISTS idx_outbox_pending ON notification_outbox(sent_at,next_attempt_at,id);
@@ -89,6 +90,21 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
     public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken ct) => ExecuteAsync(
         "UPDATE ticket_snapshots SET is_terminal=1,terminal_at=$terminalAt WHERE code=$code", ct,
         ("$terminalAt", terminalAt.ToOffset(TimeSpan.FromHours(7)).ToString("O")), ("$code", code));
+
+    public async Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(ConnectionString); await connection.OpenAsync(ct);
+        var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(1) FROM notification_ledger WHERE ticket_code=$code AND notification_type=$type AND discriminator=$disc";
+        command.Parameters.AddWithValue("$code", ticketCode);
+        command.Parameters.AddWithValue("$type", notificationType);
+        command.Parameters.AddWithValue("$disc", discriminator);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct)) > 0;
+    }
+
+    public Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken ct) => ExecuteAsync(
+        "INSERT OR IGNORE INTO notification_ledger(ticket_code,notification_type,discriminator,sent_at) VALUES($code,$type,$disc,$now)", ct,
+        ("$code", ticketCode), ("$type", notificationType), ("$disc", discriminator), ("$now", DateTimeOffset.Now.ToString("O")));
 
     public Task SaveEventAsync(TicketEvent item, CancellationToken ct) => ExecuteAsync("""
         INSERT OR IGNORE INTO ticket_events(event_key,ticket_code,event_type,payload,detected_at) VALUES($key,$code,$type,$payload,$detected)
@@ -178,6 +194,13 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
 
                 DELETE FROM ticket_snapshots
                 WHERE is_terminal=1 AND COALESCE(terminal_at, updated_at) < $cutoff;
+
+                DELETE FROM notification_ledger
+                WHERE ticket_code IN (
+                    SELECT nl.ticket_code FROM notification_ledger nl
+                    LEFT JOIN ticket_snapshots ts ON ts.code=nl.ticket_code
+                    WHERE ts.code IS NULL AND nl.sent_at < $cutoff
+                );
 
                 PRAGMA optimize;
                 """;

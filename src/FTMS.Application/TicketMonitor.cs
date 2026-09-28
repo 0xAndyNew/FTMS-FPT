@@ -116,6 +116,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         foreach (var code in activeCodes)
         {
             _missingMonitoredAttempts.Remove(code);
+            // Xóa closed cache khi ticket active lại (không phải terminal), tránh stale history ghi đè
+            var activeTicket = apiTickets.FirstOrDefault(x => string.Equals(x.Code, code, StringComparison.OrdinalIgnoreCase));
+            if (activeTicket is not null && !activeTicket.Status.IsTerminal(settings.UnprocessedIsTerminal))
+                _closedCache.Remove(code);
         }
 
         // Closed history is only relevant when it closes a ticket already being monitored.
@@ -136,27 +140,27 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 try
                 {
                     var history = await client.GetLatestStatusHistoryAsync(activeCode, TicketStatus.Closed, cancellationToken);
-                    var fallbackClosed = _active[activeCode] with
+                    // Chỉ tạo Closed khi có bằng chứng authoritative từ history API
+                    if (history?.OccurredAt is not null)
                     {
-                        Status = TicketStatus.Closed,
-                        UpdatedAt = history?.OccurredAt ?? DateTimeOffset.UtcNow,
-                        ClosedAt = history?.OccurredAt ?? DateTimeOffset.UtcNow,
-                        ClosedByName = history?.Actor,
-                        IsTerminal = true
-                    };
-                    tickets.Add(fallbackClosed);
-                    _closedCache[activeCode] = fallbackClosed;
+                        var fallbackClosed = _active[activeCode] with
+                        {
+                            Status = TicketStatus.Closed,
+                            UpdatedAt = history.OccurredAt,
+                            ClosedAt = history.OccurredAt,
+                            ClosedByName = history.Actor,
+                            IsTerminal = true
+                        };
+                        tickets.Add(fallbackClosed);
+                        _closedCache[activeCode] = fallbackClosed;
+                    }
+                    // Nếu history trả null/không có OccurredAt → KHÔNG tạo synthetic Closed
+                    // Ticket sẽ được giữ lại trong _active cho đến khi có xác nhận đóng thật
                 }
                 catch
                 {
-                    var syntheticClosed = _active[activeCode] with
-                    {
-                        Status = TicketStatus.Closed,
-                        UpdatedAt = DateTimeOffset.UtcNow,
-                        ClosedAt = DateTimeOffset.UtcNow,
-                        IsTerminal = true
-                    };
-                    tickets.Add(syntheticClosed);
+                    // API lỗi → KHÔNG tạo synthetic Closed, giữ ticket trong _active
+                    // Sẽ retry ở poll kế tiếp
                 }
             }
         }
@@ -199,11 +203,40 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         foreach (var item in events)
         {
             if (await store.EventExistsAsync(item.EventKey, cancellationToken)) continue;
+
+            // Durable one-shot guard: "TICKET MỚI" chỉ gửi đúng 1 lần cho mỗi ticket
+            if (item.EventType == TicketEventType.Created &&
+                await store.HasNotificationAsync(item.TicketCode, "Created", "", cancellationToken))
+                continue;
+
+            // Durable guard cho reminder: mỗi milestone chỉ gửi 1 lần
+            if (item.EventType == TicketEventType.UnassignedReminder)
+            {
+                var disc = item.Reason; // discriminator đã có trong EventKey
+                var bucket = disc; // sẽ dùng ticket code + type + discriminator từ event
+                // Lấy discriminator từ EventKey hash - dùng lại logic: event key chứa discriminator
+                // Thay vào đó dùng trực tiếp reason chứa số phút
+                var minuteMatch = System.Text.RegularExpressions.Regex.Match(item.Reason, @"(\d+) phút");
+                var reminderDisc = minuteMatch.Success ? $"unassigned-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
+                if (await store.HasNotificationAsync(item.TicketCode, "UnassignedReminder", reminderDisc, cancellationToken))
+                    continue;
+            }
+
             _active.TryGetValue(item.TicketCode, out var previous);
             var message = TicketNotificationFilter.ShouldNotify(item, previous)
                 ? NotificationFormatter.Format(item, ihubBase)
                 : null;
             await store.SaveEventAndEnqueueNotificationAsync(item, message, cancellationToken);
+
+            // Ghi vào ledger sau khi enqueue thành công
+            if (item.EventType == TicketEventType.Created)
+                await store.RecordNotificationAsync(item.TicketCode, "Created", "", cancellationToken);
+            else if (item.EventType == TicketEventType.UnassignedReminder)
+            {
+                var minuteMatch = System.Text.RegularExpressions.Regex.Match(item.Reason, @"(\d+) phút");
+                var reminderDisc = minuteMatch.Success ? $"unassigned-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
+                await store.RecordNotificationAsync(item.TicketCode, "UnassignedReminder", reminderDisc, cancellationToken);
+            }
         }
 
         // 3. Batch save snapshots to SQLite in a single transaction
