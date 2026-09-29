@@ -19,6 +19,20 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
     public DateTimeOffset LastCleanupTime => _lastCleanupTime;
     public int LastCleanupDay => _lastCleanupDay;
 
+    public bool TryGetTrackedStatus(string code, out TicketStatus status)
+    {
+        lock (_active)
+        {
+            if (_active.TryGetValue(code, out var snapshot))
+            {
+                status = snapshot.Status;
+                return true;
+            }
+        }
+        status = default;
+        return false;
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         await store.InitializeAsync(cancellationToken);
@@ -26,18 +40,18 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         await CheckAndRunDailyCleanupAsync(cancellationToken);
     }
 
-    public async Task RunAsync(Func<bool> userIsActive, CancellationToken cancellationToken)
+    public async Task RunAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                if (!userIsActive() && !await client.IsAuthenticatedAsync(cancellationToken))
+                if (!await client.IsAuthenticatedAsync(cancellationToken))
                 {
                     SummaryChanged?.Invoke(UnavailableSummary());
                     await client.BeginLoginRecoveryAsync(cancellationToken);
                 }
-                else if (!userIsActive())
+                else
                 {
                     await SyncNowAsync(cancellationToken);
                 }
@@ -46,7 +60,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             catch (UnauthorizedAccessException)
             {
                 SummaryChanged?.Invoke(UnavailableSummary());
-                if (!userIsActive()) await client.BeginLoginRecoveryAsync(cancellationToken);
+                await client.BeginLoginRecoveryAsync(cancellationToken);
             }
             catch (Exception ex) { StatusChanged?.Invoke($"Loi: {ex.Message}"); }
             try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, settings.PollIntervalSeconds)), cancellationToken); }
@@ -69,6 +83,25 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             await sender.SendPendingAsync(cancellationToken);
         }
         finally { _syncLock.Release(); }
+    }
+
+    public async Task SyncUntilStatusAsync(string code, TicketStatus expectedStatus,
+        CancellationToken cancellationToken)
+    {
+        foreach (var delay in new[] { 0, 500, 1500 })
+        {
+            if (delay > 0) await Task.Delay(delay, cancellationToken);
+            await _syncLock.WaitAsync(cancellationToken);
+            try
+            {
+                var includeHistory = _forceHistoryNext;
+                _forceHistoryNext = false;
+                await PollOnceAsync(includeHistory, cancellationToken);
+                await sender.SendPendingAsync(cancellationToken);
+            }
+            finally { _syncLock.Release(); }
+            if (TryGetTrackedStatus(code, out var status) && status == expectedStatus) return;
+        }
     }
 
     private async Task PollOnceAsync(bool forceHistoryUpfront, CancellationToken cancellationToken)

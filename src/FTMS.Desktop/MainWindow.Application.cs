@@ -45,7 +45,7 @@ public partial class MainWindow
         try
         {
             await monitor.InitializeAsync(_monitorCancellation.Token);
-            _ = monitor.RunAsync(() => DateTimeOffset.Now - _lastUserActivity < TimeSpan.FromSeconds(settings.IdleDelaySeconds), _monitorCancellation.Token);
+            _ = monitor.RunAsync(_monitorCancellation.Token);
             MonitorStatusText.Text = "Da bat theo doi";
         }
         catch (Exception ex) { MonitorStatusText.Text = $"Khong the khoi dong: {ex.Message}"; }

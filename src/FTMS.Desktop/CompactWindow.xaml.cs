@@ -39,6 +39,7 @@ public partial class CompactWindow : Window
     private bool _visibleNavigationInProgress;
     private bool _manualLoginNotificationShown;
     private bool _checkingTelegram;
+    private Task _statusMutationSync = Task.CompletedTask;
     private DateTimeOffset _lastUserActivity = DateTimeOffset.MinValue;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
     private bool _allowClose;
@@ -129,6 +130,7 @@ public partial class CompactWindow : Window
         FtmsWebView.CoreWebView2.SourceChanged += (_, _) => UpdateCurrentPage();
         MonitorWebView.NavigationCompleted += OnMonitorNavigationCompleted;
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
+        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStatusMutationScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStickyPagerScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
         await MonitorWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
@@ -152,10 +154,38 @@ public partial class CompactWindow : Window
     {
         try
         {
-            string? message; try { message = JsonSerializer.Deserialize<string>(e.WebMessageAsJson); } catch (JsonException) { return; }
-            if (message == "ftms-user-activity") { MarkUserActivity(); return; }
+            using var payload = JsonDocument.Parse(e.WebMessageAsJson);
+            if (payload.RootElement.ValueKind == JsonValueKind.String)
+            {
+                if (payload.RootElement.GetString() == "ftms-user-activity") MarkUserActivity();
+                return;
+            }
+            if (payload.RootElement.ValueKind != JsonValueKind.Object ||
+                !payload.RootElement.TryGetProperty("type", out var type) ||
+                type.GetString() != "ftms-status-mutation") return;
+            var code = payload.RootElement.TryGetProperty("code", out var codeValue) ? codeValue.GetString() : null;
+            var status = payload.RootElement.TryGetProperty("status", out var statusValue) && statusValue.TryGetInt32(out var parsedStatus)
+                ? parsedStatus : 0;
+            if (string.IsNullOrWhiteSpace(code) || !Enum.IsDefined(typeof(TicketStatus), status)) return;
+            var detectedAt = payload.RootElement.TryGetProperty("detectedAt", out var detectedValue) && detectedValue.TryGetInt64(out var parsedAt)
+                ? parsedAt : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            QueueStatusMutationSync(code, (TicketStatus)status, detectedAt);
         }
         catch (Exception ex) { MonitorText.Text = $"L\u1ed7i \u0111\u1ed3ng b\u1ed9 th\u1eddi gian th\u1ef1c: {ex.Message}"; }
+    }
+
+    private void QueueStatusMutationSync(string code, TicketStatus expectedStatus, long detectedAt)
+    {
+        _statusMutationSync = _statusMutationSync.ContinueWith(async _ =>
+        {
+            var monitor = _monitor;
+            var accountLifetime = _accountLifetime;
+            if (monitor is null || accountLifetime?.IsCancellationRequested != false) return;
+            await monitor.SyncUntilStatusAsync(code, expectedStatus, accountLifetime.Token);
+            if (monitor.TryGetTrackedStatus(code, out var status) && status == expectedStatus) return;
+            await Dispatcher.InvokeAsync(() => MonitorText.Text =
+                $"\u0110ang ch\u1edd FTMS x\u00e1c nh\u1eadn {code} \u2192 {expectedStatus.DisplayName()} ({detectedAt}).");
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
     }
 
     private async void OnVisibleFtmsResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
@@ -383,9 +413,7 @@ public partial class CompactWindow : Window
             _activeAccountId = accountId;
             _monitorStarted = true;
             MonitorText.Text = "Bắt đầu theo dõi ticket";
-            _ = Task.Run(() => monitor.RunAsync(
-                () => DateTimeOffset.UtcNow - _lastUserActivity < TimeSpan.FromSeconds(15),
-                accountLifetime.Token));
+            _ = Task.Run(() => monitor.RunAsync(accountLifetime.Token));
         }
         catch (OperationCanceledException) when (accountLifetime.IsCancellationRequested) { }
         catch (Exception ex) { MonitorText.Text = $"Không thể khởi tạo giám sát: {ex.Message}"; }

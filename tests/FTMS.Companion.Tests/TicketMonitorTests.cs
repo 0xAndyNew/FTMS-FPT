@@ -136,21 +136,16 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
-    public async Task RunAsync_PausesPollingWhileUserIsActive()
+    public async Task RunAsync_PollsContinuouslyIndependentOfVisibleUserActivity()
     {
         var client = new FakeFtmsClient(null, []);
         var settings = new AppSettings { PollIntervalSeconds = 1 };
         var monitor = new TicketMonitor(client, new MemoryStore(), new NullSender(), new TicketChangeDetector(), settings);
 
         using var cts = new CancellationTokenSource();
-        var userIsActive = true;
-        var runTask = monitor.RunAsync(() => userIsActive, cts.Token);
+        var runTask = monitor.RunAsync(cts.Token);
 
         await Task.Delay(150);
-        Assert.Equal(0, client.GetTicketsCallCount);
-
-        userIsActive = false;
-        await Task.Delay(1100);
         Assert.True(client.GetTicketsCallCount > 0);
 
         cts.Cancel();

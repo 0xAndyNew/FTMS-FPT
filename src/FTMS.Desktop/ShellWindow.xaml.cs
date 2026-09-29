@@ -75,7 +75,7 @@ public partial class ShellWindow : Window
         if (!login && url.Contains("/ihub/", StringComparison.OrdinalIgnoreCase) && !_monitorStarted && _monitor is not null)
         {
             _monitorStarted = true;
-            _ = _monitor.RunAsync(() => false, _lifetime.Token);
+            _ = _monitor.RunAsync(_lifetime.Token);
         }
     }
 
