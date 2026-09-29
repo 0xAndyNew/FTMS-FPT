@@ -7,17 +7,18 @@ internal static class FtmsUserActivityScript
           if (window !== window.top || window.__ftmsCompanionActivityInstalled) return;
           window.__ftmsCompanionActivityInstalled = true;
           let lastSent = 0;
-          const report = () => {
+          const report = force => {
             const now = Date.now();
             window.__ftmsCompanionLastInputAt = now;
-            if (now - lastSent < 400) return;
+            if (!force && now - lastSent < 400) return;
             lastSent = now;
             window.chrome?.webview?.postMessage('ftms-user-activity');
           };
-          for (const eventName of ['pointermove', 'pointerdown', 'keydown', 'input',
-                                   'wheel', 'touchstart', 'scroll'])
-            document.addEventListener(eventName, report, { capture: true, passive: true });
-          window.addEventListener('focus', report);
+          for (const eventName of ['pointerdown', 'keydown', 'input', 'touchstart'])
+            document.addEventListener(eventName, () => report(true), { capture: true, passive: true });
+          for (const eventName of ['pointermove', 'wheel', 'scroll'])
+            document.addEventListener(eventName, () => report(false), { capture: true, passive: true });
+          window.addEventListener('focus', () => report(true));
         })();
         """;
 }

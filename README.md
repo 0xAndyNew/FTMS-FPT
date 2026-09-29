@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.11`
+- **Phiên bản:** `1.0.12`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -297,7 +297,7 @@ Bảng `notification_outbox` đặt ràng buộc `UNIQUE(event_key)`. Nếu sự
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.11.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.12.exe`.
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 
@@ -322,7 +322,7 @@ Mở ứng dụng, nhấn vào biểu tượng ⚙️ (**Cài đặt**) trên th
 5. Nhấn **Lưu cài đặt**. Token sẽ tự động được mã hóa bảo vệ bằng Windows DPAPI.
 
 ### 8.2. Cấu hình Tự động làm mới & Khởi động
-- **Tự động làm mới:** Tích chọn để tự động bấm nút làm mới danh sách FTMS. Chu kỳ mặc định: `30` giây (tối thiểu 5 giây, tối đa 3600 giây).
+- **Tự động làm mới:** Tích chọn để tự động bấm nút làm mới danh sách FTMS khi người dùng đang ở trang danh sách và đã ngừng thao tác ít nhất 15 giây. Nút tải lại trên thanh công cụ luôn reload trang FTMS hiện tại; việc chuyển menu không reset các chỉ số dashboard. Chu kỳ mặc định: `30` giây (tối thiểu 5 giây, tối đa 3600 giây).
 - **Khởi động cùng Windows:** Tích chọn nếu muốn FTMS Companion tự động chạy ngầm mỗi khi bật máy tính.
 
 ---
@@ -351,7 +351,7 @@ Chạy script PowerShell đi kèm để tự động publish single-file và đ�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
-Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.11.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
+Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.12.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
 
 ---
 

@@ -36,6 +36,7 @@ public partial class CompactWindow : Window
     private bool _isListPage;
     private bool _settingsOpen;
     private bool _refreshInProgress;
+    private bool _visibleNavigationInProgress;
     private bool _manualLoginNotificationShown;
     private bool _checkingTelegram;
     private DateTimeOffset _lastUserActivity = DateTimeOffset.MinValue;
@@ -118,6 +119,7 @@ public partial class CompactWindow : Window
         FtmsWebView.CoreWebView2.WebResourceResponseReceived += OnVisibleFtmsResponseReceived;
         FtmsWebView.CoreWebView2.NavigationStarting += (_, args) =>
         {
+            _visibleNavigationInProgress = true;
             _isListPage = false;
             MarkUserActivity();
             _visibleNavigationGeneration++;
@@ -242,6 +244,8 @@ public partial class CompactWindow : Window
 
     private async void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
     {
+        _visibleNavigationInProgress = false;
+        _refreshInProgress = false;
         if (_lifetime.IsCancellationRequested || _displayLoginRecovery is null) return;
         if (!e.IsSuccess)
         {
@@ -281,10 +285,10 @@ public partial class CompactWindow : Window
                     return;
                 }
                 SetSessionStatus("Đã kết nối", "#4AA47B");
-                UpdateDashboard(new DashboardSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, visibleIdentity));
                 if (_expectedAccountId != visibleIdentity.UserId)
                 {
                     DeactivateAccount();
+                    UpdateDashboard(new DashboardSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, visibleIdentity));
                     _expectedAccountId = visibleIdentity.UserId;
                     _hiddenReloadAttempts = 0;
                     if (MonitorWebView.Source is null ||
@@ -403,19 +407,27 @@ public partial class CompactWindow : Window
         finally { _settingsOpen = false; MarkUserActivity(); }
     }
     private void OpenFtms(object sender, RoutedEventArgs e) => FtmsWebView.Source = new Uri(FtmsUrl);
-    private async void ReloadFtms(object sender, RoutedEventArgs e)
+    private void ReloadFtms(object sender, RoutedEventArgs e)
     {
+        MarkUserActivity();
         var monitor = _monitor;
         var accountLifetime = _accountLifetime;
         if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
-        {
             _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
+
+        if (FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
+        _refreshInProgress = true;
+        MonitorText.Text = "Đang tải lại trang FTMS";
+        try { FtmsWebView.Reload(); }
+        catch (Exception ex)
+        {
+            _refreshInProgress = false;
+            MonitorText.Text = $"Không thể tải lại trang FTMS: {ex.Message}";
         }
-        await RefreshTicketGridAsync(automatic: false);
     }
     private void OnUserActivity(object sender, InputEventArgs e) => MarkUserActivity();
     private void MarkUserActivity() => _lastUserActivity = DateTimeOffset.UtcNow;
-    private bool IsUserBusy() => _settingsOpen || !_isListPage ||
+    private bool IsUserBusy() => _settingsOpen || _visibleNavigationInProgress || !_isListPage ||
         DateTimeOffset.UtcNow - _lastUserActivity < TimeSpan.FromSeconds(15);
 
     private void UpdateCurrentPage()
@@ -434,27 +446,25 @@ public partial class CompactWindow : Window
     private async void RunAutoRefresh()
     {
         if (!IsVisible || IsUserBusy()) return;
-        await RefreshTicketGridAsync(automatic: true);
+        await RefreshTicketGridAsync();
     }
 
-    private async Task RefreshTicketGridAsync(bool automatic)
+    private async Task RefreshTicketGridAsync()
     {
         if (FtmsWebView.CoreWebView2 is null || !_isListPage || _refreshInProgress) return;
         _refreshInProgress = true;
-        var automaticValue = automatic ? "true" : "false";
-        var script = $$"""
+        const string script = """
             (() => {
               if (location.hostname.toLowerCase() !== 'ftms.fpt.net' ||
-                  !/^\/ihub\/list\/?$/i.test(location.pathname)) return;
-              if ({{automaticValue}} &&
-                  Date.now() - (window.__ftmsCompanionLastInputAt || 0) < 15000) return;
-              document.querySelector('a.k-pager-refresh.k-link')?.click();
+                  !/^\/ihub\/list\/?$/i.test(location.pathname)) return false;
+              if (Date.now() - (window.__ftmsCompanionLastInputAt || 0) < 15000) return false;
+              const refresh = document.querySelector('a.k-pager-refresh.k-link');
+              if (!refresh) return false;
+              refresh.click();
+              return true;
             })()
             """;
-        try
-        {
-            await FtmsWebView.ExecuteScriptAsync(script);
-        }
+        try { await FtmsWebView.ExecuteScriptAsync(script); }
         catch (Exception ex) { MonitorText.Text = $"Không thể làm mới danh sách: {ex.Message}"; }
         finally { _refreshInProgress = false; }
     }
