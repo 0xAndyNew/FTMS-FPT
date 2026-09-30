@@ -13,15 +13,31 @@ public sealed class TelegramCallbackReceiver(
     Func<string, CancellationToken, Task<TicketClaimResult>> claimTicket,
     Action<string>? reportStatus = null)
 {
-    public async Task CheckAsync(CancellationToken cancellationToken)
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
+    public async Task CheckAsync(CancellationToken cancellationToken, int timeoutSeconds = 0)
+    {
+        if (!await _gate.WaitAsync(0, cancellationToken)) return;
+        try
+        {
+            await CheckInternalAsync(cancellationToken, timeoutSeconds);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task CheckInternalAsync(CancellationToken cancellationToken, int timeoutSeconds)
     {
         var telegram = settings();
         if (string.IsNullOrWhiteSpace(telegram.Token) || string.IsNullOrWhiteSpace(telegram.ChatId)) return;
 
         var offsetPath = GetOffsetPath(telegram.Token);
         var offset = await ReadOffsetAsync(offsetPath, cancellationToken);
+        var timeout = Math.Max(0, timeoutSeconds);
         using var response = await http.GetAsync(
-            $"https://api.telegram.org/bot{telegram.Token}/getUpdates?offset={offset}&timeout=0&allowed_updates=%5B%22callback_query%22%5D",
+            $"https://api.telegram.org/bot{telegram.Token}/getUpdates?offset={offset}&timeout={timeout}&allowed_updates=%5B%22callback_query%22%5D",
             cancellationToken);
         var root = await ReadTelegramResponseAsync(response, cancellationToken);
         if (!root.TryGetProperty("result", out var results) || results.ValueKind != JsonValueKind.Array) return;
@@ -78,12 +94,13 @@ public sealed class TelegramCallbackReceiver(
                 break;
             }
 
+            var editMarkupTask = Task.CompletedTask;
             if (callback.TryGetProperty("message", out var sourceMessage) &&
                 sourceMessage.TryGetProperty("message_id", out var messageIdElement))
             {
                 var route = code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) ||
                     code.StartsWith("AL", StringComparison.OrdinalIgnoreCase) ? "case" : "request";
-                await PostBestEffortAsync(telegram.Token, "editMessageReplyMarkup", new
+                editMarkupTask = PostBestEffortAsync(telegram.Token, "editMessageReplyMarkup", new
                 {
                     chat_id = callbackChatId,
                     message_id = messageIdElement.GetInt64(),
@@ -103,7 +120,8 @@ public sealed class TelegramCallbackReceiver(
                 TicketClaimStatus.AlreadyOwnedByCurrentUser => $"{code} đã thuộc tài khoản FTMS hiện tại",
                 _ => result.Message
             };
-            await AnswerBestEffortAsync(telegram.Token, callbackId, successText, !result.IsSuccess, cancellationToken);
+            var answerTask = AnswerBestEffortAsync(telegram.Token, callbackId, successText, !result.IsSuccess, cancellationToken);
+            await Task.WhenAll(editMarkupTask, answerTask);
             await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
         }
     }

@@ -18,7 +18,7 @@ public partial class CompactWindow : Window
     private readonly SettingsStore _settingsStore = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _refreshTimer = new();
-    private readonly DispatcherTimer _telegramTimer = new() { Interval = TimeSpan.FromSeconds(4) };
+    private Task? _telegramLoopTask;
     private readonly HttpClient _http;
     private readonly string _stateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
     private TelegramCallbackReceiver? _telegramReceiver;
@@ -47,10 +47,9 @@ public partial class CompactWindow : Window
     public CompactWindow()
     {
         InitializeComponent(); _settingsStore.Load(); _http = TelegramHttpClientFactory.Create(() => _settingsStore.Current); Loaded += InitializeAsync;
-        Closed += (_, _) => { _lifetime.Cancel(); _accountLifetime?.Cancel(); _refreshTimer.Stop(); _telegramTimer.Stop(); _http.Dispose(); _trayIcon?.Dispose(); };
+        Closed += (_, _) => { _lifetime.Cancel(); _accountLifetime?.Cancel(); _refreshTimer.Stop(); _http.Dispose(); _trayIcon?.Dispose(); };
         Closing += OnWindowClosing;
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();
-        _telegramTimer.Tick += async (_, _) => await CheckTelegramActionsAsync();
         InitializeTrayIcon();
     }
 
@@ -145,7 +144,7 @@ public partial class CompactWindow : Window
                 message, _settingsStore.Current.TelegramToken)));
         _ftmsClient.LoginRecoveryStatusChanged += OnMonitorLoginRecoveryStatusChanged;
         ApplyRefreshSettings();
-        _telegramTimer.Start();
+        _telegramLoopTask = Task.Run(() => RunTelegramLoopAsync(_lifetime.Token));
         FtmsWebView.Source = new Uri(FtmsUrl);
         MonitorWebView.Source = new Uri(FtmsUrl);
     }
@@ -497,11 +496,45 @@ public partial class CompactWindow : Window
         finally { _refreshInProgress = false; }
     }
 
+    private async Task RunTelegramLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var receiver = _telegramReceiver;
+            var accountId = _activeAccountId;
+            if (receiver is null || accountId is null)
+            {
+                try { await Task.Delay(1000, cancellationToken); }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
+                continue;
+            }
+
+            try
+            {
+                await receiver.CheckAsync(cancellationToken, timeoutSeconds: 25);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _ = Dispatcher.BeginInvoke(() =>
+                {
+                    MonitorText.Text = "Lỗi thao tác Telegram: " +
+                        TelegramErrorSanitizer.Sanitize(ex.Message, _settingsStore.Current.TelegramToken);
+                });
+                try { await Task.Delay(3000, cancellationToken); }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
+            }
+        }
+    }
+
     private async Task CheckTelegramActionsAsync()
     {
         if (_checkingTelegram || _telegramReceiver is null || _activeAccountId is null) return;
         _checkingTelegram = true;
-        try { await _telegramReceiver.CheckAsync(_lifetime.Token); }
+        try { await _telegramReceiver.CheckAsync(_lifetime.Token, timeoutSeconds: 0); }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception ex)
         {

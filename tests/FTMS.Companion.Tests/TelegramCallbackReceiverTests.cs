@@ -77,6 +77,22 @@ public sealed class TelegramCallbackReceiverTests
         Assert.True(File.Exists(System.IO.Path.Combine(directory.Path, "telegram-999.offset")));
     }
 
+    [Fact]
+    public async Task LongPollingPassesConfiguredTimeoutSeconds()
+    {
+        using var directory = new TemporaryDirectory();
+        Uri? requestedUri = null;
+        var handler = new TelegramHandler(Updates(10, "RQ-1"), req => requestedUri ??= req.RequestUri);
+        using var http = new HttpClient(handler);
+        var receiver = new TelegramCallbackReceiver(directory.Path, () => ("123:token", "456"), http,
+            (_, _) => Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok")));
+
+        await receiver.CheckAsync(CancellationToken.None, timeoutSeconds: 25);
+
+        Assert.NotNull(requestedUri);
+        Assert.Contains("timeout=25", requestedUri.Query);
+    }
+
     private static string Updates(params object[] values)
     {
         var updates = new List<object>();
@@ -98,10 +114,11 @@ public sealed class TelegramCallbackReceiverTests
         return JsonSerializer.Serialize(new { ok = true, result = updates });
     }
 
-    private sealed class TelegramHandler(string updates) : HttpMessageHandler
+    private sealed class TelegramHandler(string updates, Action<HttpRequestMessage>? onRequest = null) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            onRequest?.Invoke(request);
             var json = request.Method == HttpMethod.Get ? updates : "{\"ok\":true,\"result\":true}";
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
