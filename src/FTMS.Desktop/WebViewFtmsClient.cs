@@ -828,9 +828,14 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const readMailFile = async fileId => {
                   if (!fileId) return '';
                   try {
-                    const response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), {
+                    let response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), {
                       credentials: 'same-origin'
                     });
+                    if (!response.ok) {
+                      response = await fetch('/ihub/Email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), {
+                        credentials: 'same-origin'
+                      });
+                    }
                     if (!response.ok) return '';
                     let content = await response.text();
                     try {
@@ -863,15 +868,22 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     };
                     history.sort((a, b) => dateValue(b) - dateValue(a) || Number(b.id || b.Id || 0) - Number(a.id || a.Id || 0));
                     for (const mail of history) {
-                      const emailId = mail.id || mail.Id || mail.emailHistoryId || mail.EmailHistoryId;
-                      const fileId = mail.fileId || mail.FileId || mail.FILEID || mail.FILE_ID || mail.emailFileId || mail.EmailFileId;
-                      let body = mail.contents || mail.Contents || mail.content || mail.Content || mail.body || mail.Body || '';
-                      if (fileId) body = await readMailFile(fileId) || body;
-                      if (String(body).trim() === String(mail.subject || mail.Subject || '').trim()) body = '';
-                      let sender = [mail.mailPoster, mail.MailPoster, mail.posterEmail, mail.PosterEmail,
-                        mail.poster, mail.Poster, mail.senderEmail, mail.SenderEmail, mail.sender, mail.Sender,
-                        mail.emailFrom, mail.EmailFrom, mail.fromEmail, mail.FromEmail,
-                        mail.fromAddress, mail.FromAddress].map(emailAddress).find(Boolean);
+                      const normalizedMail = Object.fromEntries(Object.entries(mail || {}).map(([key, value]) => [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]));
+                      const mailField = (...names) => {
+                        for (const name of names) {
+                          const value = normalizedMail[name.replace(/[^a-z0-9]/gi, '').toLowerCase()];
+                          if (value !== undefined && value !== null && value !== '') return value;
+                        }
+                        return null;
+                      };
+                      const emailId = mailField('id', 'emailhistoryid', 'maxeh');
+                      const fileId = mailField('fileid', 'file_id', 'emailfileid', 'email_file_id', 'attachfileid', 'attach_file_id', 'file');
+                      let body = '';
+                      if (fileId) body = await readMailFile(fileId);
+                      if (!body) body = mailField('contents', 'content', 'body') || '';
+                      if (String(body).trim() === String(mailField('subject', 'emailsubject', 'title') || '').trim()) body = '';
+                      let sender = [mailField('mailposter', 'posteremail', 'poster', 'senderemail', 'sender',
+                        'emailfrom', 'fromemail', 'fromaddress', 'mailfrom', 'from')].map(emailAddress).find(Boolean);
                       if (!sender) {
                         const candidates = Object.entries(mail).flatMap(([key, value]) => {
                           if (!/(?:from|sender|poster)/i.test(key)) return [];
@@ -880,18 +892,16 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                         });
                         sender = candidates[0]?.email || null;
                       }
-                      if (ignoredSender(sender, mail.poster, mail.Poster, mail.mailPoster, mail.MailPoster) ||
+                      if (ignoredSender(sender, mailField('poster', 'mailposter', 'sender', 'from')) ||
                           automatedReceipt(body)) continue;
                       const fallbackDate = Object.entries(mail).find(([key, fieldValue]) =>
                         /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
-                      const rawDate = mail.sendDate || mail.SendDate || mail.sentDate || mail.SentDate ||
-                        mail.emailDate || mail.EmailDate ||
-                        mail.createDate || mail.CreateDate || mail.createdDate || mail.CreatedDate ||
-                        mail.date || mail.Date || fallbackDate || null;
+                      const rawDate = mailField('senddate', 'sentdate', 'emaildate', 'createdate', 'createddate',
+                        'date', 'lasttimeresponse', 'lastresponsetime', 'timeresponse', 'responsetime', 'sentat') || fallbackDate;
                       const parsedDate = parseMailDate(rawDate);
-                      return JSON.stringify({ id: String(emailId || ''),
+                      return JSON.stringify({ id: String(emailId || fileId || ''),
                         sentAt: parsedDate?.toISOString() || null,
-                        from: sender, subject: mail.subject || mail.Subject || null, body });
+                        from: sender, subject: mailField('subject', 'emailsubject', 'title') || null, body });
                     }
                     // All email rows were deliberately excluded; the C88 fallback
                     // must not reintroduce an automated sender.
@@ -929,8 +939,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     }
                     return null;
                   };
-                  const fileId = field('FILEID', 'FILE_ID', 'EMAIL_FILE_ID'); let body = '';
+                  const fileId = field('FILEID', 'FILE_ID', 'EMAIL_FILE_ID', 'ATTACHFILEID', 'ATTACH_FILE_ID', 'FILE');
+                  let body = '';
                   if (fileId) body = await readMailFile(fileId);
+                  if (!body) body = field('CONTENTS', 'CONTENT', 'BODY') || '';
                   const emailId = field('MAX_EH', 'EMAIL_HISTORY_ID', 'ID');
                   const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME', 'SEND_DATE', 'SENT_AT', 'CREATE_DATE');
                   const parsedSentAt = parseMailDate(rawSentAt);

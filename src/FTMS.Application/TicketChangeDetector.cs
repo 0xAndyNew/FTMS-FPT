@@ -195,20 +195,48 @@ public sealed class TicketChangeDetector
 
         static bool Complete(LatestEmail? email) => email is not null &&
             !string.IsNullOrWhiteSpace(email.From) && email.SentAt is not null &&
-            !string.IsNullOrWhiteSpace(email.Body);
+            !string.IsNullOrWhiteSpace(email.Body) && !IsTruncatedPreview(email.Body);
         static int Completeness(LatestEmail email) =>
             (string.IsNullOrWhiteSpace(email.From) ? 0 : 1) +
             (email.SentAt is null ? 0 : 1) +
             (string.IsNullOrWhiteSpace(email.Subject) ? 0 : 1) +
-            (string.IsNullOrWhiteSpace(email.Body) ? 0 : 1);
+            (string.IsNullOrWhiteSpace(email.Body) ? 0 : 1) +
+            (!string.IsNullOrWhiteSpace(email.Body) && !IsTruncatedPreview(email.Body) ? 1 : 0);
     }
 
-    private static LatestEmail? SelectEmail(params LatestEmail?[] candidates) =>
-        (candidates.FirstOrDefault() is { } fetched && !fetched.IsExcluded() ? fetched : null) ??
-        candidates.Skip(1).Where(email => email is not null && !email.IsExcluded())
-            .OrderByDescending(email => email!.SentAt)
-            .ThenByDescending(email => long.TryParse(email!.Id, out var id) ? id : 0)
+    private static bool IsTruncatedPreview(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return false;
+        var trimmed = body.TrimEnd();
+        return trimmed.EndsWith("...") && trimmed.Length <= 300;
+    }
+
+    private static LatestEmail? SelectEmail(params LatestEmail?[] candidates)
+    {
+        var valid = candidates.Where(email => email is not null && !email.IsExcluded()).Select(email => email!).ToList();
+        if (valid.Count == 0) return null;
+
+        var fetched = valid.FirstOrDefault(e => ReferenceEquals(e, candidates.FirstOrDefault()));
+        if (fetched is not null && !string.IsNullOrWhiteSpace(fetched.Body) && !IsTruncatedPreview(fetched.Body))
+            return fetched;
+
+        var newest = valid.OrderByDescending(e => e.SentAt).First();
+        var fullMatchForNewest = valid
+            .Where(e => !string.IsNullOrWhiteSpace(e.Body) && !IsTruncatedPreview(e.Body) &&
+                (!string.IsNullOrWhiteSpace(e.Id) && string.Equals(e.Id, newest.Id, StringComparison.OrdinalIgnoreCase) ||
+                 e.SentAt is not null && newest.SentAt is not null && Math.Abs((e.SentAt.Value - newest.SentAt.Value).TotalSeconds) < 60))
+            .OrderByDescending(e => e.Body?.Length ?? 0)
             .FirstOrDefault();
+
+        if (fullMatchForNewest is not null) return fullMatchForNewest;
+
+        return valid
+            .OrderByDescending(email => email.SentAt)
+            .ThenByDescending(email => !string.IsNullOrWhiteSpace(email.Body) && !IsTruncatedPreview(email.Body) ? 1 : 0)
+            .ThenByDescending(email => email.Body?.Length ?? 0)
+            .ThenByDescending(email => long.TryParse(email.Id, out var id) ? id : 0)
+            .FirstOrDefault();
+    }
 
     private static TicketEvent Create(TicketSnapshot snapshot, TicketEventType type, TicketStatus? previous,
         string reason, LatestEmail? email, string discriminator = "", string? changedBy = null, DateTimeOffset? changedAt = null,

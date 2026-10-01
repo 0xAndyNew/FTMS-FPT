@@ -168,7 +168,7 @@ public static partial class NotificationFormatter
     private static partial Regex HtmlTagRegex();
     [GeneratedRegex(@"<hr\b|id\s*=\s*['""](?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]", RegexOptions.IgnoreCase)]
     private static partial Regex LatestMessageHtmlRegex();
-    [GeneratedRegex(@"<(?:br\s*/?|/p|/div|/li)>", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"<br\s*/?>|</?(?:p|div|tr|li|blockquote|h[1-6])\b[^>]*>|</(?:td|th)>", RegexOptions.IgnoreCase)]
     private static partial Regex BreakRegex();
     [GeneratedRegex(@"[^\S\r\n]+")]
     private static partial Regex LineWhitespaceRegex();
