@@ -105,27 +105,49 @@ public static partial class NotificationFormatter
         value = WebUtility.HtmlDecode(HtmlTagRegex().Replace(value, " "));
         value = LineWhitespaceRegex().Replace(value, " ");
         value = MultiLineRegex().Replace(value, "\n").Trim();
+
+        // 1. Cut quoted email thread / original message headers
         var quotedHeader = QuotedHeaderRegex().Match(value);
         if (quotedHeader.Success && quotedHeader.Index > 20)
             value = value[..quotedHeader.Index].Trim();
+
+        // 2. Cut standard confidentiality notices and separator lines
         foreach (var marker in new[]
         {
-            "THÔNG BÁO BẢO MẬT", "THONG BAO BAO MAT", "CONFIDENTIALITY NOTICE",
+            "THÔNG BÁO BẢO MẬT", "THONG BAO BAO MAT", "CONFIDENTIALITY NOTICE", "IMPORTANT NOTICE",
             "__________________________", "*************************"
         })
         {
             var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
             if (index >= 0) value = value[..index].Trim();
         }
+
+        // 3. Cut mobile signatures and original message markers
         foreach (var marker in new[]
         {
-            "Thanks & Best regards", "Thanks and Best regards", "Best regards", "Kind regards", "Regards,",
-            "Trân trọng", "Tải Outlook for", "-----Original Message-----", "\nTừ:", "\nTừ:", "\nFrom:"
+            "Tải Outlook for", "Get Outlook for", "Sent from my iPhone", "Sent from my iPad",
+            "-----Original Message-----", "-----Tin nhắn gốc-----"
         })
         {
             var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
             if (index > 20) value = value[..index].Trim();
         }
+
+        // 4. Cut closing signatures intelligently:
+        // Only match when closing phrase is on its own line (or starts a closing block),
+        // preventing accidental truncation of sentences like "Chúng tôi trân trọng thông báo..."
+        var closingMatch = ClosingLineRegex().Match(value);
+        if (closingMatch.Success && closingMatch.Index > 20)
+        {
+            // Verify there is substantial content before the closing phrase
+            var beforeClosing = value[..closingMatch.Index].Trim();
+            if (beforeClosing.Length >= 10)
+            {
+                value = beforeClosing;
+            }
+        }
+
+        // 5. Cut corporate signature blocks by known company/department names
         foreach (var marker in new[]
         {
             "FPT Telecom International Co., Ltd", "FPT Telecom International",
@@ -140,7 +162,11 @@ public static partial class NotificationFormatter
             if (signatureStart < 0) signatureStart = previousLine >= 0 ? previousLine + 1 : index;
             value = value[..signatureStart].Trim();
         }
-        value = value.Length > 2500 ? value[..2500] + "..." : value;
+
+        // Telegram limit is 4096 chars per message; allow up to 3500 chars for body alone
+        if (value.Length > 3500)
+            value = value[..3500] + "...";
+
         return value;
     }
 
@@ -166,7 +192,7 @@ public static partial class NotificationFormatter
 
     [GeneratedRegex("<[^>]+>")]
     private static partial Regex HtmlTagRegex();
-    [GeneratedRegex(@"<hr\b|id\s*=\s*['""](?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"<hr\b[^>]*tabindex\s*=\s*['""]?-1|<hr\b[^>]*id\s*=\s*['""]?(?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]?|<(?:div|span|p)\b[^>]*id\s*=\s*['""](?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]", RegexOptions.IgnoreCase)]
     private static partial Regex LatestMessageHtmlRegex();
     [GeneratedRegex(@"<br\s*/?>|</?(?:p|div|tr|li|blockquote|h[1-6])\b[^>]*>|</(?:td|th)>", RegexOptions.IgnoreCase)]
     private static partial Regex BreakRegex();
@@ -174,6 +200,8 @@ public static partial class NotificationFormatter
     private static partial Regex LineWhitespaceRegex();
     [GeneratedRegex(@"(?:\r?\n\s*){3,}")]
     private static partial Regex MultiLineRegex();
-    [GeneratedRegex(@"From:\s*.{0,200}?\b(?:Sent|Date):", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    [GeneratedRegex(@"(?:\r?\n|^)\s*(?:From|Từ|Từ)\s*:\s*.{0,200}?\b(?:Sent|Date|Gửi|Đã gửi|Ngày)\s*:", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
     private static partial Regex QuotedHeaderRegex();
+    [GeneratedRegex(@"(?m)^\s*(?:(?:many\s+)?thanks?\s*(?:&|and)\s*(?:best\s*)?regards?|best\s*regards?|kind\s*regards?|regards|trân\s*trọng(?:\s+(?:cảm\s*ơn|kính\s*chào))?|tran\s*trong|thân\s*ái|than\s*ai)\b[,\s.:!]*$", RegexOptions.IgnoreCase)]
+    private static partial Regex ClosingLineRegex();
 }

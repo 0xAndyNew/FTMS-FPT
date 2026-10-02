@@ -29,6 +29,74 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
+    public void CleanEmail_DoesNotCutOnTranTrongInsideBody()
+    {
+        var html = "<p>Kính gửi quý khách,</p><p>Công ty chúng tôi trân trọng thông báo về lịch bảo trì định kỳ hệ thống máy chủ vào ngày 10/10/2026. Chi tiết máy chủ: Server A, Server B.</p>";
+        var cleaned = NotificationFormatter.CleanEmail(html);
+
+        Assert.Contains("trân trọng thông báo", cleaned);
+        Assert.Contains("Server A, Server B", cleaned);
+    }
+
+    [Fact]
+    public void CleanEmail_DoesNotCutOnFormFieldsWithFromOrTu()
+    {
+        var html = "<p>Nhờ IT hỗ trợ cấu hình:</p><p>Từ: Chi nhánh Quận 9</p><p>Đến: Chi nhánh Tân Thuận</p><p>Ghi chú: Cần hoàn thành trước 17h.</p>";
+        var cleaned = NotificationFormatter.CleanEmail(html);
+
+        Assert.Contains("Từ: Chi nhánh Quận 9", cleaned);
+        Assert.Contains("Đến: Chi nhánh Tân Thuận", cleaned);
+        Assert.Contains("Cần hoàn thành trước 17h", cleaned);
+    }
+
+    [Fact]
+    public void CleanEmail_StripsClosingLineAtEndCleanly()
+    {
+        var html = "<p>Kính gửi anh Tuấn,</p><p>Nhờ anh kiểm tra giúp em ticket này nhé.</p><p>Trân trọng,</p><p>Nguyễn Văn A - Phòng Kỹ thuật</p>";
+        var cleaned = NotificationFormatter.CleanEmail(html);
+
+        Assert.Contains("Nhờ anh kiểm tra giúp em ticket này nhé", cleaned);
+        Assert.DoesNotContain("Nguyễn Văn A - Phòng Kỹ thuật", cleaned);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_DetectsUnicodeEllipsisPreview()
+    {
+        var detector = new TicketChangeDetector();
+        var code = "RQ-TEST-3";
+        var unicodeEllipsisPreview = "Dear anh, nhờ anh kiểm tra giúp em hệ thống…";
+        var fullEmailBody = "<p>Dear anh, nhờ anh kiểm tra giúp em hệ thống mạng đang bị chập chờn từ sáng nay.</p>";
+
+        var calls = 0;
+        var client = new TestFtmsClient(onGetLatestEmail: () =>
+        {
+            calls++;
+            return calls == 1
+                ? new LatestEmail("101", DateTimeOffset.UtcNow, "sender@fpt.com", "Subject", unicodeEllipsisPreview)
+                : new LatestEmail("101", DateTimeOffset.UtcNow, "sender@fpt.com", "Subject", fullEmailBody);
+        });
+
+        var snapshot = new TicketSnapshot
+        {
+            Code = code,
+            Status = TicketStatus.New,
+            LatestEmail = new LatestEmail("101", DateTimeOffset.UtcNow, "sender@fpt.com", "Subject", unicodeEllipsisPreview)
+        };
+
+        var events = await detector.DetectAsync(
+            new Dictionary<string, TicketSnapshot>(),
+            [snapshot],
+            client,
+            new AppSettings(),
+            CancellationToken.None);
+
+        Assert.Equal(2, calls); // Must have retried because unicode ellipsis was detected
+        var createdEvent = Assert.Single(events);
+        Assert.NotNull(createdEvent.LatestEmail);
+        Assert.Contains("chập chờn từ sáng nay", createdEvent.LatestEmail.Body);
+    }
+
+    [Fact]
     public async Task ChangeDetector_RetriesWhenEmailIsTruncatedPreview()
     {
         var detector = new TicketChangeDetector();

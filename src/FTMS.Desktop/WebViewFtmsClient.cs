@@ -819,33 +819,80 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     try { return unwrapRows(JSON.parse(value), depth + 1); } catch { return []; }
                   }
                   if (typeof value !== 'object') return [];
-                  for (const key of ['Data','data','Rows','rows','Items','items','Result','result']) {
+                  for (const key of ['Data','data','Rows','rows','Items','items','Result','result','list','List']) {
                     const rows = unwrapRows(value[key], depth + 1);
                     if (rows.length) return rows;
                   }
                   return [];
                 };
+                const isTruncated = text => {
+                  const s = String(text || '').trim();
+                  if (!s || /\.{3}$/.test(s) || /…$/.test(s) || /&nb\.{3}$/i.test(s) || /&nb…$/i.test(s)) return true;
+                  const compact = s.replace(/\s+/g, ' ').replace(/[.!,:;]+$/g, '').trim();
+                  return compact.length <= 80 && /^(?:dear|hi|hello|chao|chào|xin chao|xin chào)\s+\S+(?:\s+\S+){0,5}$/i.test(compact);
+                };
                 const readMailFile = async fileId => {
                   if (!fileId) return '';
+                  const cleanId = String(fileId).trim();
                   try {
-                    let response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), {
-                      credentials: 'same-origin'
+                    let response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId), {
+                      credentials: 'same-origin',
+                      headers: { 'X-Requested-With': 'XMLHttpRequest' }
                     });
                     if (!response.ok) {
-                      response = await fetch('/ihub/Email/ReadMailFromFile?fileId=' + encodeURIComponent(fileId), {
-                        credentials: 'same-origin'
+                      response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId) + '&storage=2', {
+                        credentials: 'same-origin',
+                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
                       });
                     }
                     if (!response.ok) return '';
-                    let content = await response.text();
+                    let text = await response.text();
+                    if (!text) return '';
                     try {
-                      const parsed = JSON.parse(content);
-                      content = typeof parsed === 'string' ? parsed :
-                        parsed?.data || parsed?.Data || parsed?.content || parsed?.Content || parsed?.body || parsed?.Body || content;
+                      const parsed = JSON.parse(text);
+                      if (typeof parsed === 'string') text = parsed;
+                      else if (parsed && typeof parsed === 'object') {
+                        text = parsed.contents || parsed.Contents || parsed.content || parsed.Content ||
+                               parsed.body || parsed.Body || parsed.html || parsed.Html ||
+                               (typeof parsed.data === 'string' ? parsed.data : parsed.data?.content || parsed.data?.body || parsed.data?.contents) ||
+                               (typeof parsed.Data === 'string' ? parsed.Data : parsed.Data?.Content || parsed.Data?.Body || parsed.Data?.Contents) ||
+                               text;
+                      }
                     } catch {}
-                    return String(content || '');
-                  } catch { return ''; }
+                    const str = String(text || '').trim();
+                    if (str && str !== '[object Object]') return str;
+                  } catch {}
+                  return '';
                 };
+                const extractFileId = obj => {
+                  if (!obj) return null;
+                  const normalized = Object.fromEntries(Object.entries(obj || {}).map(([k, v]) => [k.replace(/[^a-z0-9]/gi, '').toLowerCase(), v]));
+                  const keys = ['fileid', 'file_id', 'emailfileid', 'email_file_id', 'attachfileid', 'attach_file_id',
+                    'strfileid', 'sourcefileid', 'mailfileguid', 'emailfileguid', 'fileguid', 'fileuuid', 'uuid', 'guid', 'file'];
+                  for (const key of keys) {
+                    const val = normalized[key.replace(/[^a-z0-9]/gi, '').toLowerCase()];
+                    if (val !== undefined && val !== null && String(val).trim()) return String(val).trim();
+                  }
+                  if (obj.contentFile && typeof obj.contentFile === 'object') {
+                    const nested = extractFileId(obj.contentFile);
+                    if (nested) return nested;
+                  }
+                  if (typeof obj.recipients === 'string') {
+                    try {
+                      const parsed = JSON.parse(obj.recipients);
+                      const nested = extractFileId(parsed);
+                      if (nested) return nested;
+                    } catch {}
+                  }
+                  for (const [k, v] of Object.entries(obj)) {
+                    if (typeof v === 'string') {
+                      const m = v.match(/[?&]fileId=([^&#\s]+)/i);
+                      if (m) return decodeURIComponent(m[1]).trim();
+                    }
+                  }
+                  return null;
+                };
+
                 // FTMS expects jQuery's default form encoding rather than JSON.
                 const historyResponse = await fetch('/ihub/Email/GetEmailByCode', {
                   method: 'POST',
@@ -877,7 +924,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                         return null;
                       };
                       const emailId = mailField('id', 'emailhistoryid', 'maxeh');
-                      const fileId = mailField('fileid', 'file_id', 'emailfileid', 'email_file_id', 'attachfileid', 'attach_file_id', 'file');
+                      const fileId = extractFileId(mail);
                       let body = '';
                       if (fileId) body = await readMailFile(fileId);
                       if (!body) body = mailField('contents', 'content', 'body') || '';
@@ -912,6 +959,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const metaResponse = await fetch('/ihub/code/code', {
                   method: 'POST',
                   credentials: 'same-origin',
+                  headers: { 'X-Requested-With': 'XMLHttpRequest' },
                   body: form
                 });
                 if (!metaResponse.ok) return JSON.stringify(null);
@@ -939,11 +987,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     }
                     return null;
                   };
-                  const fileId = field('FILEID', 'FILE_ID', 'EMAIL_FILE_ID', 'ATTACHFILEID', 'ATTACH_FILE_ID', 'FILE');
+                  const emailId = field('MAX_EH', 'EMAIL_HISTORY_ID', 'ID');
+                  const fileId = extractFileId(row);
                   let body = '';
                   if (fileId) body = await readMailFile(fileId);
                   if (!body) body = field('CONTENTS', 'CONTENT', 'BODY') || '';
-                  const emailId = field('MAX_EH', 'EMAIL_HISTORY_ID', 'ID');
                   const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME', 'SEND_DATE', 'SENT_AT', 'CREATE_DATE');
                   const parsedSentAt = parseMailDate(rawSentAt);
                   let sentAt = parsedSentAt?.toISOString() || null;

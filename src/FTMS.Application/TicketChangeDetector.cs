@@ -41,11 +41,15 @@ public sealed class TicketChangeDetector
 
             if (old.Status != snapshot.Status)
             {
-                var email = await LatestEmailAsync();
+                var email = (old.LatestEmail is not null && !old.LatestEmail.IsExcluded() &&
+                    !string.IsNullOrWhiteSpace(old.LatestEmail.Body) &&
+                    (snapshot.LatestEmail is null || snapshot.LatestEmail.Id == old.LatestEmail.Id))
+                    ? old.LatestEmail
+                    : await LatestEmailAsync();
                 var history = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken);
                 if (history?.OccurredAt is null)
                 {
-                    await Task.Delay(300, cancellationToken);
+                    await Task.Delay(200, cancellationToken);
                     history = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken) ?? history;
                 }
                 var reason = IsNewEmail(old.LatestEmail, email) ? "Có email mới trong luồng ticket" : "Trạng thái ticket đã thay đổi";
@@ -61,7 +65,11 @@ public sealed class TicketChangeDetector
             if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) &&
                 (old.AssigneeId != snapshot.AssigneeId || old.DepartmentId != snapshot.DepartmentId))
             {
-                var email = await LatestEmailAsync();
+                var email = (old.LatestEmail is not null && !old.LatestEmail.IsExcluded() &&
+                    !string.IsNullOrWhiteSpace(old.LatestEmail.Body) &&
+                    (snapshot.LatestEmail is null || snapshot.LatestEmail.Id == old.LatestEmail.Id))
+                    ? old.LatestEmail
+                    : await LatestEmailAsync();
                 var enriched = snapshot with { LatestEmail = email };
                 var discriminator = $"{old.AssigneeId}>{snapshot.AssigneeId}|{old.DepartmentId}>{snapshot.DepartmentId}";
                 events.Add(Create(enriched, TicketEventType.AssignmentChanged, old.Status, "Người xử lý hoặc phòng ban đã thay đổi",
@@ -208,7 +216,15 @@ public sealed class TicketChangeDetector
     {
         if (string.IsNullOrWhiteSpace(body)) return false;
         var trimmed = body.TrimEnd();
-        return trimmed.EndsWith("...") && trimmed.Length <= 300;
+        if (trimmed.EndsWith("...") || trimmed.EndsWith("…") ||
+            trimmed.EndsWith("&nb...", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.EndsWith("&nb…", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var singleLine = System.Text.RegularExpressions.Regex.Replace(trimmed, @"\s+", " ");
+        if (singleLine.Length <= 80 &&
+            System.Text.RegularExpressions.Regex.IsMatch(singleLine, @"^(?:dear|hi|hello|chao|chào|xin chao|xin chào)\s+\S+(?:\s+\S+){0,5}$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+        return false;
     }
 
     private static LatestEmail? SelectEmail(params LatestEmail?[] candidates)

@@ -36,10 +36,18 @@ public sealed class TelegramOutboxSender(string databasePath, Func<(string Token
                 object[][] buttons = canReceive
                     ? [[new { text = "🔎 Mở ticket", url = openUrl }, new { text = "🙋 Nhận ticket", callback_data = $"receive:{code}" }]]
                     : [[new { text = "🔎 Mở ticket", url = openUrl }]];
-                var response = await http.PostAsJsonAsync($"https://api.telegram.org/bot{telegram.Token}/sendMessage",
-                    new { chat_id = telegram.ChatId, text = item.Message, parse_mode = "HTML", disable_web_page_preview = true,
-                        reply_markup = new { inline_keyboard = buttons } }, ct);
-                response.EnsureSuccessStatusCode();
+
+                var parts = SplitMessageIfExceedsLimit(item.Message, 4000);
+                for (var i = 0; i < parts.Count; i++)
+                {
+                    var isFirst = i == 0;
+                    object payload = isFirst
+                        ? new { chat_id = telegram.ChatId, text = parts[i], parse_mode = "HTML", disable_web_page_preview = true, reply_markup = new { inline_keyboard = buttons } }
+                        : new { chat_id = telegram.ChatId, text = parts[i], parse_mode = "HTML", disable_web_page_preview = true };
+                    var response = await http.PostAsJsonAsync($"https://api.telegram.org/bot{telegram.Token}/sendMessage", payload, ct);
+                    response.EnsureSuccessStatusCode();
+                }
+
                 await MarkSentAndCleanupAsync(connection, item.Id, item.EventKey, ct);
             }
             catch (Exception ex)
@@ -48,6 +56,41 @@ public sealed class TelegramOutboxSender(string databasePath, Func<(string Token
                     TelegramErrorSanitizer.Sanitize(ex.Message, telegram.Token), item.Attempts + 1, ct);
             }
         }
+    }
+
+    private static IReadOnlyList<string> SplitMessageIfExceedsLimit(string message, int limit = 4000)
+    {
+        if (string.IsNullOrWhiteSpace(message) || message.Length <= limit)
+            return [message];
+
+        var parts = new List<string>();
+        var remaining = message;
+        var partIndex = 1;
+
+        while (remaining.Length > limit)
+        {
+            var splitIndex = remaining.LastIndexOf('\n', limit);
+            if (splitIndex < limit / 2) splitIndex = limit;
+
+            var part = remaining[..splitIndex];
+            remaining = remaining[splitIndex..].TrimStart('\r', '\n');
+
+            var inBlockquote = part.Contains("<blockquote>", StringComparison.OrdinalIgnoreCase) &&
+                               !part.Contains("</blockquote>", StringComparison.OrdinalIgnoreCase);
+            if (inBlockquote)
+            {
+                part += "\n</blockquote>";
+                if (!remaining.StartsWith("<blockquote>", StringComparison.OrdinalIgnoreCase))
+                    remaining = $"<b>Phần {partIndex + 1}:</b>\n<blockquote>\n{remaining}";
+            }
+            parts.Add(part);
+            partIndex++;
+        }
+
+        if (!string.IsNullOrWhiteSpace(remaining))
+            parts.Add(remaining);
+
+        return parts;
     }
 
     private static async Task MarkSentAndCleanupAsync(SqliteConnection connection, long id, string eventKey, CancellationToken ct)
