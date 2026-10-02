@@ -23,9 +23,11 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
             CREATE TABLE IF NOT EXISTS ticket_events(event_key TEXT PRIMARY KEY,ticket_code TEXT NOT NULL,event_type TEXT NOT NULL,payload TEXT NOT NULL,detected_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS notification_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT NOT NULL UNIQUE,message TEXT NOT NULL,attempt_count INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,sent_at TEXT NULL,last_error TEXT NULL);
             CREATE TABLE IF NOT EXISTS notification_ledger(ticket_code TEXT NOT NULL,notification_type TEXT NOT NULL,discriminator TEXT NOT NULL DEFAULT '',sent_at TEXT NOT NULL,PRIMARY KEY(ticket_code,notification_type,discriminator));
+            CREATE TABLE IF NOT EXISTS telegram_claim_messages(ticket_code TEXT NOT NULL,chat_id TEXT NOT NULL,message_id INTEGER NOT NULL,sent_at TEXT NOT NULL,PRIMARY KEY(ticket_code,chat_id,message_id));
             CREATE INDEX IF NOT EXISTS idx_ticket_events_code ON ticket_events(ticket_code);
             CREATE INDEX IF NOT EXISTS idx_ticket_events_detected ON ticket_events(detected_at);
             CREATE INDEX IF NOT EXISTS idx_outbox_pending ON notification_outbox(sent_at,next_attempt_at,id);
+            CREATE INDEX IF NOT EXISTS idx_claim_messages_code ON telegram_claim_messages(ticket_code);
             """;
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -200,6 +202,12 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
                     SELECT nl.ticket_code FROM notification_ledger nl
                     LEFT JOIN ticket_snapshots ts ON ts.code=nl.ticket_code
                     WHERE ts.code IS NULL AND nl.sent_at < $cutoff
+                );
+
+                DELETE FROM telegram_claim_messages
+                WHERE sent_at < $cutoff OR ticket_code IN (
+                    SELECT code FROM ticket_snapshots
+                    WHERE is_terminal=1 AND COALESCE(terminal_at, updated_at) < $cutoff
                 );
 
                 PRAGMA optimize;

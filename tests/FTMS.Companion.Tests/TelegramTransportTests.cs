@@ -59,4 +59,95 @@ public sealed class TelegramTransportTests
         const string message = "Proxy localhost:8080 failed at 12:30 for chat 6800804130 and RQ20260001.";
         Assert.Equal(message, TelegramErrorSanitizer.Sanitize(message));
     }
+
+    [Fact]
+    public void CanReceiveTicket_ReturnsFalse_WhenTicketHasAssignee()
+    {
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "RQ20261002-0001",
+            Status = FTMS.Domain.TicketStatus.InProgress,
+            AssigneeId = 12345,
+            AssigneeName = "Nguyen Van A"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key1",
+            TicketCode = "RQ20261002-0001",
+            EventType = FTMS.Domain.TicketEventType.AssignmentChanged,
+            CurrentStatus = FTMS.Domain.TicketStatus.InProgress,
+            PreviousStatus = FTMS.Domain.TicketStatus.New,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "Assigned",
+            PreviousAssigneeName = "Chưa nhận",
+            Snapshot = snapshot
+        };
+
+        var canReceive = TelegramOutboxSender.CanReceiveTicket(evt, "Mã RQ: RQ20261002-0001\nNgười xử lý: Nguyen Van A");
+        Assert.False(canReceive);
+    }
+
+    [Fact]
+    public void CanReceiveTicket_ReturnsFalse_WhenMessageIndicatesClaimed()
+    {
+        var canReceive = TelegramOutboxSender.CanReceiveTicket(null,
+            "🙋 <b>🟢 TICKET ĐÃ CÓ NGƯỜI NHẬN</b>\nMã RQ: RQ20261002-0001\nNgười xử lý: Nguyen Van A");
+        Assert.False(canReceive);
+    }
+
+    [Fact]
+    public void CanReceiveTicket_ReturnsTrue_WhenUnassignedAndNew()
+    {
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "RQ20261002-0002",
+            Status = FTMS.Domain.TicketStatus.New,
+            AssigneeId = null,
+            AssigneeName = "Chưa nhận"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key2",
+            TicketCode = "RQ20261002-0002",
+            EventType = FTMS.Domain.TicketEventType.Created,
+            CurrentStatus = FTMS.Domain.TicketStatus.New,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "Created",
+            Snapshot = snapshot
+        };
+
+        var canReceive = TelegramOutboxSender.CanReceiveTicket(evt, "📨 <b>🔴 TICKET MỚI</b>\nMã RQ: RQ20261002-0002\nNgười xử lý: Chưa nhận");
+        Assert.True(canReceive);
+    }
+
+    [Fact]
+    public void NotificationFormatter_IncludesCreatedTimeAndCorrectLabel()
+    {
+        var createdAt = new DateTimeOffset(2026, 10, 2, 14, 30, 0, TimeSpan.FromHours(7));
+        var detectedAt = createdAt.AddMinutes(25);
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "RQ20261002-0003",
+            Status = FTMS.Domain.TicketStatus.InProgress,
+            CreatedAt = createdAt,
+            AssigneeName = "Nguyen Van B"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key3",
+            TicketCode = "RQ20261002-0003",
+            EventType = FTMS.Domain.TicketEventType.StatusChanged,
+            CurrentStatus = FTMS.Domain.TicketStatus.InProgress,
+            PreviousStatus = FTMS.Domain.TicketStatus.New,
+            DetectedAt = detectedAt,
+            Reason = "StatusChanged",
+            Snapshot = snapshot
+        };
+
+        var formatted = FTMS.Application.NotificationFormatter.Format(evt, "https://ftms.fpt.net");
+
+        Assert.Contains("⏰ <b>Thời gian tạo:</b> 02/10/2026 14:30 (UTC+07:00)", formatted);
+        Assert.Contains("🕰 <b>Thời gian từ lúc tạo ticket:</b> 25 phút", formatted);
+        Assert.DoesNotContain("tồn tại từ lúc nhận ticket", formatted);
+    }
 }

@@ -45,6 +45,8 @@ public static partial class NotificationFormatter
         if (item.EventType is not TicketEventType.AssignmentChanged and not TicketEventType.Created and
             not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
             text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
+        if (ticket.CreatedAt is not null)
+            text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value, includeSeconds: false)}");
         var ageMinutes = ticket.CreatedAt is null ? 0 : Math.Max(0, (int)(item.DetectedAt - ticket.CreatedAt.Value).TotalMinutes);
         if (item.EventType is TicketEventType.Created or TicketEventType.UnassignedReminder)
             text.AppendLine($"⏱ <b>Thời gian chưa nhận ticket:</b> {ageMinutes} phút");
@@ -55,7 +57,7 @@ public static partial class NotificationFormatter
             text.AppendLine($"⏱ <b>Thời gian từ lúc có phản hồi mới:</b> {responseMinutes} phút");
         }
         else if (item.EventType != TicketEventType.Terminal || ticket.Status != TicketStatus.Closed)
-            text.AppendLine($"🕰 <b>Thời gian tồn tại từ lúc nhận ticket:</b> {ageMinutes} phút");
+            text.AppendLine($"🕰 <b>Thời gian từ lúc tạo ticket:</b> {ageMinutes} phút");
         var changeTime = item.ChangedAt ?? (ticket.Status == TicketStatus.Closed ? ticket.UpdatedAt : null);
         if (isStatusTransition && changeTime is not null)
             text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value, includeSeconds: false)}");
