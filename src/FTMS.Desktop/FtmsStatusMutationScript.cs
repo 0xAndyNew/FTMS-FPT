@@ -9,12 +9,16 @@ internal static class FtmsStatusMutationScript
 
           const nativeFetch = window.fetch;
           const NativeXMLHttpRequest = window.XMLHttpRequest;
-          const endpointPattern = /^\/ihub\/(?:request|incident|case|problem|cr|changerequest|[a-z0-9_-]+)\/(?:changestatus|updatestatus|closeticket|close)(?:v\d+)?\/?$/i;
-          const matchesEndpoint = value => {
+          const statusEndpointPattern = /^\/ihub\/(?:request|incident|case|problem|cr|changerequest|[a-z0-9_-]+)\/(?:changestatus|updatestatus|closeticket|close)(?:v\d+)?\/?$/i;
+          const assignmentEndpointPattern = /^\/ihub\/(?:request|incident|case|problem|cr|changerequest|[a-z0-9_-]+)\/takeandassignment(?:v\d+)?\/?$/i;
+          const endpointType = value => {
             try {
               const url = new URL(String(value || ''), location.href);
-              return url.origin === location.origin && endpointPattern.test(url.pathname);
-            } catch { return false; }
+              if (url.origin !== location.origin) return null;
+              if (statusEndpointPattern.test(url.pathname)) return 'status';
+              if (assignmentEndpointPattern.test(url.pathname)) return 'assignment';
+            } catch { }
+            return null;
           };
           const entriesOf = body => {
             const entries = [];
@@ -64,14 +68,26 @@ internal static class FtmsStatusMutationScript
           const notify = (url, body, payload) => {
             try {
               if (!succeeded(payload)) return;
+              const mutationType = endpointType(url);
               const entries = entriesOf(body);
               const code = read(entries, ['code','input[code]','ticketCode','requestCode']) ||
                 location.pathname.match(/(?:RQ|CA|IN|PR|CR)[A-Z0-9_-]+/i)?.[0] || '';
+              if (!/^(?:RQ|CA|IN|PR|CR)[A-Z0-9_-]+$/i.test(code)) return;
+              if (mutationType === 'assignment') {
+                const assigneeId = Number(read(entries, ['staffId','staff_ID','input[staffId]','input[staff_ID]',
+                  'assigneeId','agentId']));
+                if (!Number.isInteger(assigneeId) || assigneeId <= 0) return;
+                window.chrome?.webview?.postMessage({
+                  type: 'ftms-assignment-mutation', code: code.toUpperCase(), assigneeId,
+                  detectedAt: Date.now()
+                });
+                return;
+              }
               const status = statusOf(read(entries, ['status','statusCode','statusId','newStatus','targetStatus',
                 'input[status]','input[statusCode]','input[ticketStatus]','ticketStatus','requestStatus']));
               const previousStatus = statusOf(read(entries, ['oldStatus','oldStatusCode','previousStatus',
                 'previousStatusCode','fromStatus','input[oldStatus]','input[oldStatusCode]']));
-              if (!/^(?:RQ|CA|IN|PR|CR)[A-Z0-9_-]+$/i.test(code) || !status) return;
+              if (!status) return;
               window.chrome?.webview?.postMessage({
                 type: 'ftms-status-mutation', code: code.toUpperCase(), status, previousStatus,
                 detectedAt: Date.now()
@@ -85,7 +101,7 @@ internal static class FtmsStatusMutationScript
               try {
                 const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
                 const method = String(init?.method || input?.method || 'GET').toUpperCase();
-                if (method === 'POST' && matchesEndpoint(url)) {
+                if (method === 'POST' && endpointType(url)) {
                   const body = init?.body !== undefined ? Promise.resolve(init.body) :
                     input?.clone ? input.clone().text().catch(() => undefined) : Promise.resolve(undefined);
                   tracked = { url, body };
@@ -97,7 +113,7 @@ internal static class FtmsStatusMutationScript
                 if (response.ok) (async () => {
                   let payload = null;
                   try {
-                    if (!response.url || matchesEndpoint(response.url)) payload = JSON.parse(await response.clone().text());
+                    if (!response.url || endpointType(response.url)) payload = JSON.parse(await response.clone().text());
                   } catch { }
                   notify(tracked.url, await tracked.body, payload);
                 })().catch(() => {});
@@ -116,7 +132,7 @@ internal static class FtmsStatusMutationScript
             };
             NativeXMLHttpRequest.prototype.send = function(body) {
               try {
-                if (this.__ftmsMethod === 'POST' && matchesEndpoint(this.__ftmsUrl)) {
+                if (this.__ftmsMethod === 'POST' && endpointType(this.__ftmsUrl)) {
                   this.addEventListener('loadend', () => {
                     try {
                       if (this.status < 200 || this.status >= 300) return;

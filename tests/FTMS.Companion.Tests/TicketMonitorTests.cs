@@ -153,6 +153,36 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task SyncUntilAssignment_RetriesUntilExpectedAssigneeAppears()
+    {
+        var unassigned = new TicketSnapshot
+        {
+            Code = "RQ-ASSIGNMENT-SYNC",
+            Status = TicketStatus.InProgress,
+            AssigneeId = null,
+            AssigneeName = "---",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center"
+        };
+        var assigned = unassigned with { AssigneeId = 42, AssigneeName = "hieu.user" };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(42, "hieu.user", null, null), [unassigned]);
+        var store = new MemoryStore();
+        var sender = new NullSender();
+        var monitor = new TicketMonitor(client, store, sender, new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        client.TicketsByCall = call => call >= 3 ? [assigned] : [unassigned];
+
+        await monitor.SyncUntilAssignmentAsync(unassigned.Code, 42, CancellationToken.None);
+
+        Assert.Equal(3, client.GetTicketsCallCount);
+        var assignmentEvent = Assert.Single(store.SavedEvents);
+        Assert.Equal(TicketEventType.AssignmentChanged, assignmentEvent.EventType);
+        Assert.Equal(42, assignmentEvent.Snapshot.AssigneeId);
+        Assert.Equal(3, sender.SendPendingCallCount);
+    }
+
+    [Fact]
     public async Task ExistingPausedTicketIsBaselinedWithoutCreatedAlertAndEmitsStatusChangedWhenResumed()
     {
         var user = new CurrentUserIdentity(42, "hieu.user", null, null);
@@ -214,6 +244,7 @@ public sealed class TicketMonitorTests
         public int GetClosedTicketsCallCount { get; private set; }
         public IReadOnlyList<TicketSnapshot> CurrentTickets { get; set; } = tickets;
         public IReadOnlyList<TicketSnapshot> CurrentClosedTickets { get; set; } = closedTickets ?? [];
+        public Func<int, IReadOnlyList<TicketSnapshot>>? TicketsByCall { get; set; }
 
         public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken) => Task.FromResult(true);
         public Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken) => Task.FromResult(user);
@@ -224,14 +255,15 @@ public sealed class TicketMonitorTests
         public Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(bool includeHistory, CancellationToken cancellationToken)
         {
             GetTicketsCallCount++;
+            var currentTickets = TicketsByCall?.Invoke(GetTicketsCallCount) ?? CurrentTickets;
             if (includeHistory)
             {
                 GetTicketsWithHistoryCount++;
-                var merged = CurrentTickets.Concat(CurrentClosedTickets).ToList();
+                var merged = currentTickets.Concat(CurrentClosedTickets).ToList();
                 return Task.FromResult<IReadOnlyList<TicketSnapshot>>(merged);
             }
             GetTicketsActiveOnlyCount++;
-            return Task.FromResult(CurrentTickets);
+            return Task.FromResult(currentTickets);
         }
 
         public Task<IReadOnlyList<TicketSnapshot>> GetClosedTicketsAsync(CancellationToken cancellationToken)
@@ -287,6 +319,12 @@ public sealed class TicketMonitorTests
 
     private sealed class NullSender : INotificationSender
     {
-        public Task SendPendingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public int SendPendingCallCount { get; private set; }
+
+        public Task SendPendingAsync(CancellationToken cancellationToken)
+        {
+            SendPendingCallCount++;
+            return Task.CompletedTask;
+        }
     }
 }

@@ -31,28 +31,35 @@ public sealed class TicketChangeDetector
             LatestEmail? fetchedEmail = null;
             var emailFetched = false;
             var emailIncludedInEvent = false;
-            async Task<LatestEmail?> LatestEmailAsync()
+            async Task<LatestEmail?> LatestEmailAsync(bool retryWhenMissing = true)
             {
                 if (emailFetched) return fetchedEmail;
-                fetchedEmail = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken), snapshot.LatestEmail, old.LatestEmail);
+                fetchedEmail = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken, retryWhenMissing),
+                    snapshot.LatestEmail, old.LatestEmail);
                 emailFetched = true;
                 return fetchedEmail;
             }
 
             if (old.Status != snapshot.Status)
             {
-                var email = (old.LatestEmail is not null && !old.LatestEmail.IsExcluded() &&
+                var emailTask = (old.LatestEmail is not null && !old.LatestEmail.IsExcluded() &&
                     !string.IsNullOrWhiteSpace(old.LatestEmail.Body) &&
                     (snapshot.LatestEmail is null || snapshot.LatestEmail.Id == old.LatestEmail.Id))
-                    ? old.LatestEmail
-                    : await LatestEmailAsync();
-                var history = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken);
-                if (history?.OccurredAt is null)
-                {
-                    await Task.Delay(200, cancellationToken);
-                    history = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken) ?? history;
-                }
+                    ? Task.FromResult<LatestEmail?>(old.LatestEmail)
+                    : LatestEmailAsync();
+                var historyTask = LatestStatusHistoryAsync();
+                await Task.WhenAll(emailTask, historyTask);
+                var email = await emailTask;
+                var history = await historyTask;
                 var reason = IsNewEmail(old.LatestEmail, email) ? "Có email mới trong luồng ticket" : "Trạng thái ticket đã thay đổi";
+
+                async Task<StatusHistoryEntry?> LatestStatusHistoryAsync()
+                {
+                    var result = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken);
+                    if (result?.OccurredAt is not null) return result;
+                    await Task.Delay(200, cancellationToken);
+                    return await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken) ?? result;
+                }
                 var isTerminal = snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal);
                 var enriched = snapshot with { LatestEmail = email, IsTerminal = isTerminal };
                 events.Add(Create(enriched, isTerminal ? TicketEventType.Terminal : TicketEventType.StatusChanged,
@@ -69,7 +76,7 @@ public sealed class TicketChangeDetector
                     !string.IsNullOrWhiteSpace(old.LatestEmail.Body) &&
                     (snapshot.LatestEmail is null || snapshot.LatestEmail.Id == old.LatestEmail.Id))
                     ? old.LatestEmail
-                    : await LatestEmailAsync();
+                    : await LatestEmailAsync(retryWhenMissing: snapshot.LatestEmail is not null);
                 var enriched = snapshot with { LatestEmail = email };
                 var discriminator = $"{old.AssigneeId}>{snapshot.AssigneeId}|{old.DepartmentId}>{snapshot.DepartmentId}";
                 events.Add(Create(enriched, TicketEventType.AssignmentChanged, old.Status, "Người xử lý hoặc phòng ban đã thay đổi",
@@ -143,7 +150,8 @@ public sealed class TicketChangeDetector
                     enriched.LatestEmail, "overdue"));
             }
 
-            if (!emailIncludedInEvent && (old.LatestEmail is null || old.UpdatedAt != snapshot.UpdatedAt))
+            if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) && !emailIncludedInEvent &&
+                (old.LatestEmail is null || old.UpdatedAt != snapshot.UpdatedAt))
             {
                 var email = await LatestEmailAsync();
                 if (IsNewEmail(old.LatestEmail, email) && email is not null)
@@ -181,10 +189,11 @@ public sealed class TicketChangeDetector
             (!long.TryParse(current.Id, out var currentId) || !long.TryParse(old.Id, out var oldId) || currentId > oldId);
     }
 
-    private static async Task<LatestEmail?> FetchLatestEmailAsync(IFtmsClient client, string code, CancellationToken ct)
+    private static async Task<LatestEmail?> FetchLatestEmailAsync(IFtmsClient client, string code, CancellationToken ct,
+        bool retryWhenMissing = true)
     {
         var first = await client.GetLatestEmailAsync(code, ct);
-        if (Complete(first)) return first;
+        if (Complete(first) || first is null && !retryWhenMissing) return first;
 
         await Task.Delay(300, ct);
         var retry = await client.GetLatestEmailAsync(code, ct);

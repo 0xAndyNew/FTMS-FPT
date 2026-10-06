@@ -85,8 +85,22 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         finally { _syncLock.Release(); }
     }
 
-    public async Task SyncUntilStatusAsync(string code, TicketStatus expectedStatus,
-        CancellationToken cancellationToken)
+    public Task SyncUntilStatusAsync(string code, TicketStatus expectedStatus,
+        CancellationToken cancellationToken) =>
+        SyncUntilAsync(() => TryGetTrackedStatus(code, out var status) && status == expectedStatus,
+            cancellationToken);
+
+    public Task SyncUntilAssignmentAsync(string code, long expectedAssigneeId,
+        CancellationToken cancellationToken) =>
+        SyncUntilAsync(() =>
+        {
+            lock (_active)
+            {
+                return _active.TryGetValue(code, out var snapshot) && snapshot.AssigneeId == expectedAssigneeId;
+            }
+        }, cancellationToken);
+
+    private async Task SyncUntilAsync(Func<bool> changeObserved, CancellationToken cancellationToken)
     {
         foreach (var delay in new[] { 0, 500, 1500 })
         {
@@ -100,7 +114,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 await sender.SendPendingAsync(cancellationToken);
             }
             finally { _syncLock.Release(); }
-            if (TryGetTrackedStatus(code, out var status) && status == expectedStatus) return;
+            if (changeObserved()) return;
         }
     }
 

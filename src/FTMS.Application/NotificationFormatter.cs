@@ -15,6 +15,7 @@ public static partial class NotificationFormatter
         text.AppendLine(item.EventType switch
         {
             TicketEventType.Created => "📨 <b>🔴 TICKET MỚI</b>",
+            TicketEventType.EmailReceived when ticket.Status == TicketStatus.Paused => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
             TicketEventType.EmailReceived => "📧 <b>🔴 EMAIL MỚI CỦA TICKET</b>",
             TicketEventType.UnassignedReminder => "🔔 <b>🟠 NHẮC TICKET CHƯA ĐƯỢC NHẬN</b>",
             TicketEventType.ResponseReminder => "🔔 <b>🟠 NHẮC TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
