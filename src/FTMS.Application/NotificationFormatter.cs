@@ -42,7 +42,16 @@ public static partial class NotificationFormatter
                 ? $"📌 <b>Trạng thái:</b> {Escape(item.PreviousStatus!.Value.DisplayName())} ➔ {Escape(ticket.Status.DisplayName())}"
                 : $"📌 <b>Trạng thái:</b> {Escape(ticket.Status.DisplayName())}");
         if (isStatusTransition && !string.IsNullOrWhiteSpace(item.ChangedBy) && item.ChangedBy.Trim() != "---")
-            text.AppendLine($"👤 <b>Người thay đổi:</b> {Escape(item.ChangedBy.Trim())}");
+            text.AppendLine($"👤 <b>Người thực hiện:</b> {Escape(item.ChangedBy.Trim())}");
+        if (!string.IsNullOrWhiteSpace(item.Note))
+            text.AppendLine($"📝 <b>Ghi chú:</b> {Escape(item.Note.Trim())}");
+        else if (!string.IsNullOrWhiteSpace(item.Reason) &&
+            !string.Equals(item.Reason, "Trạng thái ticket đã thay đổi", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(item.Reason, "Người xử lý hoặc phòng ban đã thay đổi", StringComparison.OrdinalIgnoreCase) &&
+            !item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) &&
+            !item.Reason.Contains("Phát hiện ticket mới", StringComparison.OrdinalIgnoreCase) &&
+            item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal)
+            text.AppendLine($"📝 <b>Ghi chú:</b> {Escape(item.Reason.Trim())}");
         if (item.EventType is not TicketEventType.AssignmentChanged and not TicketEventType.Created and
             not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
             text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
@@ -82,7 +91,9 @@ public static partial class NotificationFormatter
                 ? snapshotEmail : null;
         var originalTicketTitle = string.IsNullOrWhiteSpace(ticket.Title) ? email?.Subject : ticket.Title;
         var emailBody = CleanEmail(email?.Body);
-        if (email is not null || !string.IsNullOrWhiteSpace(originalTicketTitle))
+        var shouldRenderBlockquote = email is not null &&
+            (!string.IsNullOrWhiteSpace(emailBody) || !string.IsNullOrWhiteSpace(email.From) || email.SentAt is not null || !string.IsNullOrWhiteSpace(originalTicketTitle));
+        if (shouldRenderBlockquote)
         {
             text.AppendLine();
             text.AppendLine("<blockquote>");

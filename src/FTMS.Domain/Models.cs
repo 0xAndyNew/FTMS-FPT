@@ -54,7 +54,7 @@ public static class LatestEmailExtensions
     public static bool IsExcluded(this LatestEmail? email) => email.IsIgnoredSender() || email.IsAutomatedAcknowledgement();
 }
 
-public sealed record StatusHistoryEntry(TicketStatus Status, DateTimeOffset? OccurredAt, string? Actor);
+public sealed record StatusHistoryEntry(TicketStatus Status, DateTimeOffset? OccurredAt, string? Actor, string? Note = null);
 
 public enum TicketClaimStatus
 {
@@ -112,6 +112,7 @@ public sealed record TicketEvent
     public string? PreviousAssigneeName { get; init; }
     public string? PreviousDepartmentName { get; init; }
     public LatestEmail? LatestEmail { get; init; }
+    public string? Note { get; init; }
     public required TicketSnapshot Snapshot { get; init; }
 }
 

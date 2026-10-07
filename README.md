@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.20`
+- **Phiên bản:** `1.0.21`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -235,10 +235,12 @@ D:\FTMS-FPT
 │       ├── WebViewLoginRecovery.cs    # State machine tự động phục hồi đăng nhập SSO
 │       ├── FtmsUserActivityScript.cs  # Script nhận diện tương tác chuột/phím
 │       ├── FtmsStickyPagerScript.cs   # Script cố định thanh phân trang Kendo UI
-│       └── FtmsBotBlockerScript.cs    # Script chặn chatbot AI gây chậm trang
+│       ├── FtmsBotBlockerScript.cs    # Script chặn chatbot AI gây chậm trang
+│       └── FtmsStatusMutationScript.cs # Script chặn bắt mutation đổi trạng thái từ browser
 ├── tests/
-│   └── FTMS.Companion.Tests/   # Bộ test tự động (20 tests passed)
+│   └── FTMS.Companion.Tests/   # Bộ test tự động (60 tests passed)
 │       ├── TicketMonitorTests.cs
+│       ├── NotificationFormatterEmailTests.cs
 │       ├── SqliteTicketStoreTests.cs
 │       ├── TelegramCallbackReceiverTests.cs
 │       ├── TelegramTransportTests.cs
@@ -292,12 +294,22 @@ Bảng `notification_outbox` đặt ràng buộc `UNIQUE(event_key)`. Nếu sự
   - Cảnh báo sắp vi phạm tại các mốc: **5 phút**, **3 phút**, **1 phút** trước khi chạm hạn.
   - Cảnh báo vi phạm ngay khi `SlaType == 3` (quá hạn).
 
+### 6.6. Tách biệt đường xử lý trạng thái & dữ liệu bổ sung (Decoupled Priority Architecture)
+Hệ thống ưu tiên tối đa tính đúng đắn và tốc độ phát hiện sự kiện trạng thái theo chuẩn:
+- **Đường trạng thái tức thì (Zero-I/O Critical Path):** Mọi thay đổi trạng thái và phân công (qua script chặn bắt mutation từ trình duyệt hoặc polling định kỳ) được so khớp, ghi nhận vào SQLite snapshot, lưu sự kiện và outbox trong một giao dịch nguyên tử (`SaveSnapshotAndEventsAsync`) ngay lập tức mà không chờ đọc email hay gửi mạng Telegram.
+- **Dữ liệu email bổ sung có timeout (Supplemental Enrichment):** Việc lấy thông tin email mới nhất chỉ được kích hoạt độc lập với timeout ngắn (~800ms) có `AbortController`. Nếu không có email mới hoặc timeout, thông báo trạng thái không đính kèm email cũ nhằm bảo đảm tính chính xác. Khi phát hiện email mới thực sự từ khách hàng, một sự kiện `EmailReceived` độc lập sẽ được phát sinh.
+- **Bộ điều phối Outbox phân tầng ưu tiên (Priority Outbox Dispatcher):** Hàng đợi gửi tin nhắn Telegram sắp xếp theo mức độ ưu tiên:
+  - *Mức 0 (Cao nhất):* Sự kiện trạng thái và phân công (`Created`, `StatusChanged`, `AssignmentChanged`, `Terminal`).
+  - *Mức 1:* Sự kiện email mới và cảnh báo SLA (`EmailReceived`, `SlaThresholdReached`).
+  - *Mức 2:* Nhắc nhở định kỳ (`UnassignedReminder`, `ResponseReminder`).
+- **Chống mất tín hiệu (Signal Coalescing):** Cơ chế đánh thức sender qua `TaskCompletionSource` an toàn đa luồng, đảm bảo tin nhắn quan trọng được gửi ra Telegram ngay lập tức khi xuất hiện sự kiện.
+
 ---
 
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.20.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.21.exe`.
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 
@@ -351,7 +363,7 @@ Chạy script PowerShell đi kèm để tự động publish single-file và đ�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
-Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.20.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
+Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.21.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
 
 ---
 
@@ -369,7 +381,7 @@ dotnet test
 Test run for D:\FTMS-FPT\tests\FTMS.Companion.Tests\bin\Debug\net8.0\FTMS.Companion.Tests.dll (.NETCoreApp,Version=v8.0)
 A total of 1 test files matched the specified pattern.
 
-Passed!  - Failed: 0, Passed: 52, Skipped: 0, Total: 52, Duration: 27 s
+Passed!  - Failed: 0, Passed: 60, Skipped: 0, Total: 60, Duration: 2 s
 ```
 
 ### Các nhóm kiểm thử chính:
@@ -426,4 +438,4 @@ Thư mục này bao gồm:
 
 ---
 
-*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 07/10/2026 cho phiên bản FTMS Companion 1.0.20.*
+*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 07/10/2026 cho phiên bản FTMS Companion 1.0.21.*

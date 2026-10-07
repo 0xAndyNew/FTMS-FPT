@@ -102,4 +102,55 @@ public sealed class SqliteTicketStoreTests : IDisposable
         Assert.Contains("RQ-CLOSED-TODAY", codes);
         Assert.DoesNotContain("RQ-CLOSED-YESTERDAY", codes);
     }
+
+    [Fact]
+    public async Task SaveSnapshotAndEventsAsync_AtomicallyPersistsAndGuardsCreatedLedger()
+    {
+        await _store.InitializeAsync(CancellationToken.None);
+
+        var snapshot = new TicketSnapshot
+        {
+            Code = "RQ-ATOMIC-1",
+            Status = TicketStatus.New,
+            Title = "Yêu cầu kiểm thử",
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        var createdEvent = new TicketEvent
+        {
+            EventKey = "KEY-CREATED-1",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.Created,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "Ticket mới",
+            Snapshot = snapshot
+        };
+
+        // First save: should record snapshot, event, outbox, and ledger
+        await _store.SaveSnapshotAndEventsAsync(snapshot, [(createdEvent, "Tin nhắn ticket mới")], CancellationToken.None);
+
+        await using (var conn = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+            var outboxCmd = conn.CreateCommand();
+            outboxCmd.CommandText = "SELECT COUNT(1) FROM notification_outbox WHERE event_key='KEY-CREATED-1'";
+            Assert.Equal(1, Convert.ToInt32(await outboxCmd.ExecuteScalarAsync()));
+
+            var ledgerCmd = conn.CreateCommand();
+            ledgerCmd.CommandText = "SELECT COUNT(1) FROM notification_ledger WHERE ticket_code='RQ-ATOMIC-1' AND notification_type='Created'";
+            Assert.Equal(1, Convert.ToInt32(await ledgerCmd.ExecuteScalarAsync()));
+        }
+
+        // Second save for the same ticket's Created event (e.g. restart / re-poll): outbox must not duplicate
+        var duplicateCreatedEvent = createdEvent with { EventKey = "KEY-CREATED-DUP" };
+        await _store.SaveSnapshotAndEventsAsync(snapshot, [(duplicateCreatedEvent, "Tin nhắn ticket mới lặp")], CancellationToken.None);
+
+        await using (var conn = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            await conn.OpenAsync();
+            var outboxCmd = conn.CreateCommand();
+            outboxCmd.CommandText = "SELECT COUNT(1) FROM notification_outbox WHERE event_key='KEY-CREATED-DUP'";
+            Assert.Equal(0, Convert.ToInt32(await outboxCmd.ExecuteScalarAsync()));
+        }
+    }
 }

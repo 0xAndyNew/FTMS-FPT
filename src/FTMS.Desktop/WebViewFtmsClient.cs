@@ -240,7 +240,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   title: pick(row, 'title','Title','subject','Subject','REQUEST_TITLE'),
                   createdAt: dateOf(pick(row, 'createDate','CreateDate','createdAt','CreatedAt','CREATE_DATE')),
                   updatedAt: dateOf(pick(row, 'updateDate','UpdateDate','updatedAt','UpdatedAt','modifyDate','ModifyDate','lastUpdate','LastUpdate')),
-                  updatedBy: pick(row, 'updatedBy','UpdatedBy','updateBy','UpdateBy','modifiedBy','ModifiedBy','lastUpdateBy','LastUpdateBy','updateStaffName','UpdateStaffName'),
+                  updatedBy: pick(row, 'updatedBy','UpdatedBy','updateBy','UpdateBy','modifiedBy','ModifiedBy','lastUpdateBy','LastUpdateBy','updateStaffName','UpdateStaffName','updater','Updater','modifyStaffName','ModifyStaffName','lastModifier','LastModifier'),
                   assigneeId: numberOf(pick(row, 'staffId','StaffId','agentId','AgentId','ASSIGNEE_ID')),
                   assigneeName: pick(row, 'agentName','AgentName','staffName','StaffName','assigneeName','AssigneeName'),
                   departmentId: numberOf(pick(row, 'deptId','DeptId','departmentId','DepartmentId','DEPARTMENT_ID')),
@@ -343,8 +343,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                         closedByUserId: numberOf(pick(row, 'closedByUserId','ClosedByUserId','closedById','ClosedById',
                           'closeUserId','CloseUserId','userId','UserId','USER_ID','staffId','StaffId','agentId','AgentId')),
                         closedByName,
-                        assigneeId: numberOf(pick(row, 'assigneeId','AssigneeId','assignedStaffId','AssignedStaffId','ASSIGNEE_ID')),
-                        assigneeName: pick(row, 'assigneeName','AssigneeName','assignedStaffName','AssignedStaffName'),
+                        assigneeId: numberOf(pick(row, 'agentId','AgentId','staffId','StaffId','assigneeId','AssigneeId','assignedStaffId','AssignedStaffId','ASSIGNEE_ID')),
+                        assigneeName: pick(row, 'agentName','AgentName','staffName','StaffName','assigneeName','AssigneeName','assignedStaffName','AssignedStaffName'),
                         departmentId: numberOf(pick(row, 'departmentId','DepartmentId','deptId','DeptId')),
                         departmentName: pick(row, 'departmentName','DepartmentName','department','Department'),
                         slaDeviationMinutes: null, slaType: null
@@ -818,6 +818,9 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         var code = JsonSerializer.Serialize(ticketCode);
         var script = $$"""
             (async () => {
+              const requestTimeoutMs = 700;
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
               try {
                 const parseMailDate = value => {
                   if (!value) return null;
@@ -885,12 +888,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const cleanId = String(fileId).trim();
                   try {
                     let response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId), {
-                      credentials: 'same-origin',
+                      credentials: 'same-origin', signal: controller.signal,
                       headers: { 'X-Requested-With': 'XMLHttpRequest' }
                     });
                     if (!response.ok) {
                       response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId) + '&storage=2', {
-                        credentials: 'same-origin',
+                        credentials: 'same-origin', signal: controller.signal,
                         headers: { 'X-Requested-With': 'XMLHttpRequest' }
                       });
                     }
@@ -945,7 +948,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 // FTMS expects jQuery's default form encoding rather than JSON.
                 const historyResponse = await fetch('/ihub/Email/GetEmailByCode', {
                   method: 'POST',
-                  credentials: 'same-origin',
+                  credentials: 'same-origin', signal: controller.signal,
                   headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                     'X-Requested-With': 'XMLHttpRequest' },
                   body: new URLSearchParams({ code: {{code}} }).toString()
@@ -1007,7 +1010,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const form = new FormData(); form.append('id', 'C88'); form.append('body', JSON.stringify({ p_strCode: {{code}} }));
                 const metaResponse = await fetch('/ihub/code/code', {
                   method: 'POST',
-                  credentials: 'same-origin',
+                  credentials: 'same-origin', signal: controller.signal,
                   headers: { 'X-Requested-With': 'XMLHttpRequest' },
                   body: form
                 });
@@ -1061,10 +1064,20 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 }
                 return JSON.stringify(null);
               } catch { return JSON.stringify(null); }
+              finally { clearTimeout(timeoutId); }
             })()
             """;
-        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
-        return DeserializeLatestEmail(json);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMilliseconds(800));
+        try
+        {
+            var json = await ExecuteAsyncJsonStringAsync(script, timeout.Token);
+            return DeserializeLatestEmail(json);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
     }
 
     public async Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken)
@@ -1132,6 +1145,9 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       // "creator" can be the mail service when an email reopens a ticket.
                       actor: row.staffName ?? row.StaffName ?? row.agentName ?? row.AgentName ??
                         row.creator ?? row.Creator ?? null,
+                      note: row.note ?? row.Note ?? row.comment ?? row.Comment ?? row.content ?? row.Content ??
+                        row.description ?? row.Description ?? row.statusChangeNote ?? row.StatusChangeNote ??
+                        row.reason ?? row.Reason ?? null,
                       id: Number(row.id ?? row.Id ?? 0) }))
                     .filter(row => row.occurredAt && Number.isFinite(row.status))
                     .sort((a, b) => new Date(a.occurredAt) - new Date(b.occurredAt) || a.id - b.id);
@@ -1139,7 +1155,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     (index === 0 || rows[index - 1].status !== row.status));
                   if (changes.length) {
                     const latest = changes[changes.length - 1];
-                    return JSON.stringify({ occurredAt: latest.occurredAt, actor: latest.actor });
+                    return JSON.stringify({ occurredAt: latest.occurredAt, actor: latest.actor, note: latest.note });
                   }
                 }
                 const editResponse = await fetch('/ihub/{{route}}/edit/' + encodeURIComponent({{code}}), {
@@ -1156,9 +1172,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const paragraphs = Array.from(item?.querySelectorAll('p') || []).map(p => normalize(p.textContent));
                   const dateText = paragraphs.find(x => x.startsWith('Ngày:'))?.replace(/^Ngày:\s*/, '') || '';
                   const actor = paragraphs.find(x => x.startsWith('Thực hiện:'))?.replace(/^Thực hiện:\s*/, '') || null;
+                  const note = paragraphs.find(x => x.startsWith('Ghi chú:'))?.replace(/^Ghi chú:\s*/, '') || null;
                   const occurredAt = parseDate(dateText);
                   const statusText = normalize(heading.textContent);
-                  return { status: statusMap[statusText.toLocaleLowerCase('vi-VN')], occurredAt, actor };
+                  return { status: statusMap[statusText.toLocaleLowerCase('vi-VN')], occurredAt, actor, note };
                 }).filter(x => x.occurredAt && x.status === {{expectedStatus}});
                 entries.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
                 return JSON.stringify(entries[0] || null);
@@ -1178,9 +1195,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             }
             if (root.ValueKind != JsonValueKind.Object) return null;
             var actor = root.TryGetProperty("actor", out var actorValue) ? actorValue.GetString() : null;
+            var note = root.TryGetProperty("note", out var noteValue) ? noteValue.GetString() : null;
             var occurredText = root.TryGetProperty("occurredAt", out var occurredValue) ? occurredValue.GetString() : null;
             DateTimeOffset? occurredAt = DateTimeOffset.TryParse(occurredText, out var parsed) ? parsed : null;
-            return new StatusHistoryEntry(status, occurredAt, actor);
+            return new StatusHistoryEntry(status, occurredAt, actor, note);
         }
         catch (JsonException) { return null; }
     }

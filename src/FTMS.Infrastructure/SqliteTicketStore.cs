@@ -112,6 +112,105 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         INSERT OR IGNORE INTO ticket_events(event_key,ticket_code,event_type,payload,detected_at) VALUES($key,$code,$type,$payload,$detected)
         """, ct, ("$key", item.EventKey), ("$code", item.TicketCode), ("$type", item.EventType.ToString()), ("$payload", JsonSerializer.Serialize(item)), ("$detected", item.DetectedAt.ToString("O")));
 
+    public async Task SaveSnapshotAndEventsAsync(TicketSnapshot snapshot,
+        IReadOnlyList<(TicketEvent Event, string? Message)> events, CancellationToken ct)
+    {
+        await using var connection = new SqliteConnection(ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(ct);
+
+        var snapshotCommand = connection.CreateCommand();
+        snapshotCommand.Transaction = transaction;
+        snapshotCommand.CommandText = """
+            INSERT INTO ticket_snapshots(code,payload,is_terminal,updated_at,terminal_at)
+            VALUES($code,$payload,$terminal,$updated,$terminalAt)
+            ON CONFLICT(code) DO UPDATE SET
+                payload=excluded.payload,
+                is_terminal=excluded.is_terminal,
+                updated_at=excluded.updated_at,
+                terminal_at=CASE WHEN excluded.is_terminal=1
+                    THEN COALESCE(ticket_snapshots.terminal_at, excluded.terminal_at) ELSE NULL END
+            """;
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).ToString("O");
+        snapshotCommand.Parameters.AddWithValue("$code", snapshot.Code);
+        snapshotCommand.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(snapshot));
+        snapshotCommand.Parameters.AddWithValue("$terminal", snapshot.IsTerminal ? 1 : 0);
+        snapshotCommand.Parameters.AddWithValue("$updated", now);
+        snapshotCommand.Parameters.AddWithValue("$terminalAt", snapshot.IsTerminal ? now : DBNull.Value);
+        await snapshotCommand.ExecuteNonQueryAsync(ct);
+
+        foreach (var (item, message) in events)
+        {
+            var eventCommand = connection.CreateCommand();
+            eventCommand.Transaction = transaction;
+            eventCommand.CommandText = """
+                INSERT OR IGNORE INTO ticket_events(event_key,ticket_code,event_type,payload,detected_at)
+                VALUES($key,$code,$type,$payload,$detected)
+                """;
+            eventCommand.Parameters.AddWithValue("$key", item.EventKey);
+            eventCommand.Parameters.AddWithValue("$code", item.TicketCode);
+            eventCommand.Parameters.AddWithValue("$type", item.EventType.ToString());
+            eventCommand.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(item));
+            eventCommand.Parameters.AddWithValue("$detected", item.DetectedAt.ToString("O"));
+            await eventCommand.ExecuteNonQueryAsync(ct);
+
+            if (string.IsNullOrWhiteSpace(message)) continue;
+
+            if (item.EventType == TicketEventType.Created)
+            {
+                var checkLedger = connection.CreateCommand();
+                checkLedger.Transaction = transaction;
+                checkLedger.CommandText = "SELECT COUNT(1) FROM notification_ledger WHERE ticket_code=$code AND notification_type='Created'";
+                checkLedger.Parameters.AddWithValue("$code", item.TicketCode);
+                if (Convert.ToInt32(await checkLedger.ExecuteScalarAsync(ct)) > 0)
+                    continue;
+
+                var recordLedger = connection.CreateCommand();
+                recordLedger.Transaction = transaction;
+                recordLedger.CommandText = "INSERT OR IGNORE INTO notification_ledger(ticket_code,notification_type,discriminator,sent_at) VALUES($code,'Created','',$now)";
+                recordLedger.Parameters.AddWithValue("$code", item.TicketCode);
+                recordLedger.Parameters.AddWithValue("$now", DateTimeOffset.Now.ToString("O"));
+                await recordLedger.ExecuteNonQueryAsync(ct);
+            }
+
+            if (item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal &&
+                item.PreviousStatus is not null)
+            {
+                var transitionKey = $"{item.PreviousStatus}>{item.CurrentStatus}";
+                var checkLedger = connection.CreateCommand();
+                checkLedger.Transaction = transaction;
+                checkLedger.CommandText = "SELECT COUNT(1) FROM notification_ledger WHERE ticket_code=$code AND notification_type=$type AND discriminator=$disc";
+                checkLedger.Parameters.AddWithValue("$code", item.TicketCode);
+                checkLedger.Parameters.AddWithValue("$type", item.EventType.ToString());
+                checkLedger.Parameters.AddWithValue("$disc", transitionKey);
+                if (Convert.ToInt32(await checkLedger.ExecuteScalarAsync(ct)) > 0)
+                    continue;
+
+                var recordLedger = connection.CreateCommand();
+                recordLedger.Transaction = transaction;
+                recordLedger.CommandText = "INSERT OR IGNORE INTO notification_ledger(ticket_code,notification_type,discriminator,sent_at) VALUES($code,$type,$disc,$now)";
+                recordLedger.Parameters.AddWithValue("$code", item.TicketCode);
+                recordLedger.Parameters.AddWithValue("$type", item.EventType.ToString());
+                recordLedger.Parameters.AddWithValue("$disc", transitionKey);
+                recordLedger.Parameters.AddWithValue("$now", DateTimeOffset.Now.ToString("O"));
+                await recordLedger.ExecuteNonQueryAsync(ct);
+            }
+
+            var outboxCommand = connection.CreateCommand();
+            outboxCommand.Transaction = transaction;
+            outboxCommand.CommandText = """
+                INSERT OR IGNORE INTO notification_outbox(event_key,message,next_attempt_at)
+                VALUES($key,$message,$next)
+                """;
+            outboxCommand.Parameters.AddWithValue("$key", item.EventKey);
+            outboxCommand.Parameters.AddWithValue("$message", message);
+            outboxCommand.Parameters.AddWithValue("$next", DateTimeOffset.Now.ToString("O"));
+            await outboxCommand.ExecuteNonQueryAsync(ct);
+        }
+
+        await transaction.CommitAsync(ct);
+    }
+
     public async Task<bool> EventExistsAsync(string eventKey, CancellationToken ct)
     {
         await using var connection = new SqliteConnection(ConnectionString); await connection.OpenAsync(ct);

@@ -6,8 +6,109 @@ namespace FTMS.Application;
 
 public sealed class TicketChangeDetector
 {
-    public async Task<IReadOnlyList<TicketEvent>> DetectAsync(IReadOnlyDictionary<string, TicketSnapshot> previous,
-        IReadOnlyList<TicketSnapshot> current, IFtmsClient client, AppSettings settings, CancellationToken cancellationToken)
+    public IReadOnlyList<TicketEvent> DetectCritical(
+        IReadOnlyDictionary<string, TicketSnapshot> previous,
+        IReadOnlyList<TicketSnapshot> current,
+        AppSettings settings)
+    {
+        var events = new List<TicketEvent>();
+        foreach (var snapshot in current)
+        {
+            previous.TryGetValue(snapshot.Code, out var old);
+            var preservedEmail = SelectEmail(snapshot.LatestEmail, old?.LatestEmail);
+            var effectiveSnapshot = snapshot with
+            {
+                LatestEmail = preservedEmail,
+                AssigneeId = (snapshot.AssigneeId is not null and not 0) ? snapshot.AssigneeId : old?.AssigneeId,
+                AssigneeName = (!string.IsNullOrWhiteSpace(snapshot.AssigneeName) && snapshot.AssigneeName.Trim() != "---" && snapshot.AssigneeName.Trim() != "Chưa nhận")
+                    ? snapshot.AssigneeName : old?.AssigneeName,
+                CreatedAt = old?.CreatedAt ?? snapshot.CreatedAt,
+                DepartmentId = snapshot.DepartmentId ?? old?.DepartmentId,
+                DepartmentName = !string.IsNullOrWhiteSpace(snapshot.DepartmentName) ? snapshot.DepartmentName : old?.DepartmentName,
+                Title = !string.IsNullOrWhiteSpace(old?.Title) ? old.Title : snapshot.Title
+            };
+
+            if (old is null)
+            {
+                if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
+                    snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused) continue;
+                var email = effectiveSnapshot.LatestEmail.IsExcluded() ? null : effectiveSnapshot.LatestEmail;
+                events.Add(Create(effectiveSnapshot with { LatestEmail = email }, TicketEventType.Created, null,
+                    "Phát hiện ticket mới", email));
+                continue;
+            }
+
+            var statusChanged = old.Status != snapshot.Status;
+            var assignmentChanged = old.AssigneeId != snapshot.AssigneeId ||
+                old.DepartmentId != snapshot.DepartmentId;
+            var changedAt = snapshot.UpdatedAt ?? DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+
+            if (statusChanged && snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
+            {
+                events.Add(Create(effectiveSnapshot with { IsTerminal = true },
+                    TicketEventType.Terminal, old.Status, "Trạng thái ticket đã thay đổi", effectiveSnapshot.LatestEmail,
+                    changedAt.ToString("O"), snapshot.UpdatedBy, changedAt));
+                continue;
+            }
+
+            if (assignmentChanged && !snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
+            {
+                var discriminator = $"{old.AssigneeId}>{snapshot.AssigneeId}|" +
+                    $"{old.DepartmentId}>{snapshot.DepartmentId}|{old.Status}>{snapshot.Status}|{changedAt:O}";
+                events.Add(Create(effectiveSnapshot, TicketEventType.AssignmentChanged,
+                    old.Status, "Người xử lý hoặc phòng ban đã thay đổi", effectiveSnapshot.LatestEmail, discriminator,
+                    snapshot.UpdatedBy, changedAt, old.AssigneeName, old.DepartmentName));
+                continue;
+            }
+
+            if (statusChanged)
+            {
+                events.Add(Create(effectiveSnapshot, TicketEventType.StatusChanged,
+                    old.Status, "Trạng thái ticket đã thay đổi", effectiveSnapshot.LatestEmail, changedAt.ToString("O"),
+                    snapshot.UpdatedBy, changedAt));
+            }
+        }
+        return events;
+    }
+
+    public async Task<IReadOnlyList<TicketEvent>> DetectAsync(
+        IReadOnlyDictionary<string, TicketSnapshot> previous,
+        IReadOnlyList<TicketSnapshot> current, IFtmsClient client, AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        var criticalEvents = DetectCritical(previous, current, settings);
+        var result = new List<TicketEvent>(criticalEvents);
+        var enrichedCurrent = current.ToList();
+        for (var i = 0; i < result.Count; i++)
+        {
+            var evt = result[i];
+            if (evt.EventType is not (TicketEventType.Created or TicketEventType.StatusChanged or TicketEventType.Terminal or TicketEventType.AssignmentChanged))
+                continue;
+
+            var enriched = await ResolveLatestEmailWithDeadlineAsync(client, evt.TicketCode, cancellationToken,
+                retryWhenMissing: false, evt.LatestEmail, evt.Snapshot.LatestEmail);
+            if (enriched is null) continue;
+
+            var enrichedSnapshot = evt.Snapshot with { LatestEmail = enriched };
+            result[i] = evt with
+            {
+                LatestEmail = enriched,
+                Snapshot = enrichedSnapshot
+            };
+            var currentIndex = enrichedCurrent.FindIndex(item =>
+                string.Equals(item.Code, evt.TicketCode, StringComparison.OrdinalIgnoreCase));
+            if (currentIndex >= 0)
+                enrichedCurrent[currentIndex] = enrichedCurrent[currentIndex] with { LatestEmail = enriched };
+        }
+        var supplementalEvents = await DetectSupplementalAsync(previous, enrichedCurrent, client, settings, cancellationToken);
+        result.AddRange(supplementalEvents);
+        return result;
+    }
+
+    public async Task<IReadOnlyList<TicketEvent>> DetectSupplementalAsync(
+        IReadOnlyDictionary<string, TicketSnapshot> previous,
+        IReadOnlyList<TicketSnapshot> current, IFtmsClient client, AppSettings settings,
+        CancellationToken cancellationToken)
     {
         var events = new List<TicketEvent>();
         foreach (var snapshot in current)
@@ -17,68 +118,31 @@ public sealed class TicketChangeDetector
             {
                 if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
                     snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused) continue;
-                var initialEmail = IsCompleteEmail(snapshot.LatestEmail)
-                    ? snapshot.LatestEmail
-                    : await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken,
-                        retryWhenMissing: snapshot.LatestEmail is not null);
-                var email = SelectEmail(initialEmail, snapshot.LatestEmail);
-                var enriched = snapshot with { LatestEmail = email };
-                events.Add(Create(enriched, TicketEventType.Created, null, "Phát hiện ticket mới", email));
                 var initialSlaReason = SlaReason(snapshot, settings.SlaThresholds);
                 if (initialSlaReason is not null)
-                    events.Add(Create(enriched, TicketEventType.SlaThresholdReached, null, initialSlaReason, email,
+                {
+                    var email = snapshot.LatestEmail.IsExcluded() ? null : snapshot.LatestEmail;
+                    events.Add(Create(snapshot with { LatestEmail = email },
+                        TicketEventType.SlaThresholdReached, null, initialSlaReason, email,
                         discriminator: snapshot.SlaType == 3 ? "overdue" : $"risk-{snapshot.SlaDeviationMinutes}"));
+                }
                 continue;
             }
 
             LatestEmail? fetchedEmail = null;
             var emailFetched = false;
-            var emailIncludedInEvent = false;
-            async Task<LatestEmail?> LatestEmailAsync(bool retryWhenMissing = true)
+            var isStateTransition = old.Status != snapshot.Status || old.AssigneeId != snapshot.AssigneeId;
+            var emailIncludedInEvent = isStateTransition && IsNewEmail(old.LatestEmail, snapshot.LatestEmail);
+            var hasEmailHint = snapshot.LatestEmail is not null || old.LatestEmail is not null;
+            async Task<LatestEmail?> LatestEmailAsync()
             {
                 if (emailFetched) return fetchedEmail;
-                fetchedEmail = await ResolveLatestEmailAsync(client, snapshot.Code, cancellationToken,
-                    retryWhenMissing, true, snapshot.LatestEmail, old.LatestEmail);
+                fetchedEmail = await ResolveLatestEmailWithDeadlineAsync(client, snapshot.Code,
+                    cancellationToken, retryWhenMissing: hasEmailHint, snapshot.LatestEmail, old.LatestEmail);
                 emailFetched = true;
                 return fetchedEmail;
             }
 
-            if (old.Status != snapshot.Status)
-            {
-                var emailTask = LatestEmailAsync();
-                var historyTask = LatestStatusHistoryAsync();
-                await Task.WhenAll(emailTask, historyTask);
-                var email = await emailTask;
-                var history = await historyTask;
-                var reason = IsNewEmail(old.LatestEmail, email) ? "Có email mới trong luồng ticket" : "Trạng thái ticket đã thay đổi";
-
-                async Task<StatusHistoryEntry?> LatestStatusHistoryAsync()
-                {
-                    var result = await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken);
-                    if (result?.OccurredAt is not null) return result;
-                    await Task.Delay(200, cancellationToken);
-                    return await client.GetLatestStatusHistoryAsync(snapshot.Code, snapshot.Status, cancellationToken) ?? result;
-                }
-                var isTerminal = snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal);
-                var enriched = snapshot with { LatestEmail = email, IsTerminal = isTerminal };
-                events.Add(Create(enriched, isTerminal ? TicketEventType.Terminal : TicketEventType.StatusChanged,
-                    old.Status, reason, enriched.LatestEmail,
-                    discriminator: history?.OccurredAt?.ToString("O") ?? snapshot.UpdatedAt?.ToString("O") ?? string.Empty,
-                    changedBy: history?.Actor, changedAt: history?.OccurredAt));
-                emailIncludedInEvent = IsNewEmail(old.LatestEmail, email);
-            }
-
-            if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) &&
-                (old.AssigneeId != snapshot.AssigneeId || old.DepartmentId != snapshot.DepartmentId))
-            {
-                var email = await LatestEmailAsync(retryWhenMissing: snapshot.LatestEmail is not null);
-                var enriched = snapshot with { LatestEmail = email };
-                var discriminator = $"{old.AssigneeId}>{snapshot.AssigneeId}|{old.DepartmentId}>{snapshot.DepartmentId}";
-                events.Add(Create(enriched, TicketEventType.AssignmentChanged, old.Status, "Người xử lý hoặc phòng ban đã thay đổi",
-                    enriched.LatestEmail, discriminator, previousAssigneeName: old.AssigneeName,
-                    previousDepartmentName: old.DepartmentName));
-                emailIncludedInEvent |= IsNewEmail(old.LatestEmail, email);
-            }
 
             var isWaitingForReceiver = snapshot.Status is TicketStatus.New or TicketStatus.Assigned &&
                 snapshot.AssigneeId is null or 0 &&
@@ -92,7 +156,7 @@ public sealed class TicketChangeDetector
                     var email = await LatestEmailAsync();
                     var enriched = snapshot with { LatestEmail = email };
                     events.Add(Create(enriched, TicketEventType.UnassignedReminder, old.Status,
-                        $"Ticket chưa được nhận sau {unassignedMinutes} phút", null,
+                        $"Ticket chưa được nhận sau {unassignedMinutes} phút", email,
                         discriminator: $"unassigned-{reminderBucket}"));
                     emailIncludedInEvent |= IsNewEmail(old.LatestEmail, email);
                 }
@@ -113,7 +177,7 @@ public sealed class TicketChangeDetector
                         ResponseReminderSince = old.ResponseReminderSince
                     };
                     events.Add(Create(enriched, TicketEventType.ResponseReminder, old.Status,
-                        $"Ticket đã có phản hồi mới {responseMinutes} phút", null,
+                        $"Ticket đã có phản hồi mới {responseMinutes} phút", email,
                         discriminator: $"response-{old.ResponseReminderEmailId}-{responseBucket}"));
                     emailIncludedInEvent |= IsNewEmail(old.LatestEmail, email);
                 }
@@ -145,15 +209,19 @@ public sealed class TicketChangeDetector
                     enriched.LatestEmail, "overdue"));
             }
 
-            if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) && !emailIncludedInEvent &&
-                (old.LatestEmail is null || old.UpdatedAt != snapshot.UpdatedAt))
+            if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) && !emailIncludedInEvent)
             {
-                var email = await LatestEmailAsync();
-                if (IsNewEmail(old.LatestEmail, email) && email is not null)
+                var listHasNewEmail = IsNewEmail(old.LatestEmail, snapshot.LatestEmail);
+                if (listHasNewEmail || old.LatestEmail is null || old.UpdatedAt != snapshot.UpdatedAt)
                 {
-                    var enriched = snapshot with { LatestEmail = email };
-                    events.Add(Create(enriched, TicketEventType.EmailReceived, old.Status,
-                        "FTMS có email mới", email, discriminator: email.Id ?? email.SentAt?.ToString("O") ?? string.Empty));
+                    var email = await LatestEmailAsync();
+                    if (IsNewEmail(old.LatestEmail, email) && email is not null)
+                    {
+                        var enriched = snapshot with { LatestEmail = email };
+                        events.Add(Create(enriched, TicketEventType.EmailReceived, old.Status,
+                            "FTMS có email mới", email,
+                            discriminator: email.Id ?? email.SentAt?.ToString("O") ?? string.Empty));
+                    }
                 }
             }
 
@@ -171,7 +239,7 @@ public sealed class TicketChangeDetector
             : null;
     }
 
-    private static bool IsNewEmail(LatestEmail? old, LatestEmail? current)
+    internal static bool IsNewEmail(LatestEmail? old, LatestEmail? current)
     {
         if (current is null || current.IsExcluded()) return false;
         if (old is null) return true;
@@ -182,6 +250,27 @@ public sealed class TicketChangeDetector
         }
         return !string.IsNullOrWhiteSpace(current.Id) && current.Id != old.Id &&
             (!long.TryParse(current.Id, out var currentId) || !long.TryParse(old.Id, out var oldId) || currentId > oldId);
+    }
+
+    internal static async Task<LatestEmail?> ResolveLatestEmailWithDeadlineAsync(IFtmsClient client,
+        string code, CancellationToken cancellationToken, bool retryWhenMissing,
+        params LatestEmail?[] cachedCandidates)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMilliseconds(800));
+        try
+        {
+            return await ResolveLatestEmailAsync(client, code, timeout.Token, retryWhenMissing,
+                true, cachedCandidates);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return SelectEmail(cachedCandidates);
+        }
+        catch
+        {
+            return SelectEmail(cachedCandidates);
+        }
     }
 
     internal static async Task<LatestEmail?> ResolveLatestEmailAsync(IFtmsClient client, string code,
@@ -207,7 +296,7 @@ public sealed class TicketChangeDetector
         return SelectEmail(first, retry);
     }
 
-    private static bool IsCompleteEmail(LatestEmail? email) => email is not null &&
+    internal static bool IsCompleteEmail(LatestEmail? email) => email is not null &&
         !email.IsExcluded() &&
         !string.IsNullOrWhiteSpace(email.From) && email.SentAt is not null &&
         !string.IsNullOrWhiteSpace(email.Body) && !IsTruncatedPreview(email.Body);
@@ -227,7 +316,7 @@ public sealed class TicketChangeDetector
         return false;
     }
 
-    private static LatestEmail? SelectEmail(params LatestEmail?[] candidates)
+    public static LatestEmail? SelectEmail(params LatestEmail?[] candidates)
     {
         var valid = candidates.Where(email => email is not null && !email.IsExcluded()).Select(email => email!).ToList();
         if (valid.Count == 0) return null;
@@ -255,16 +344,23 @@ public sealed class TicketChangeDetector
 
     private static TicketEvent Create(TicketSnapshot snapshot, TicketEventType type, TicketStatus? previous,
         string reason, LatestEmail? email, string discriminator = "", string? changedBy = null, DateTimeOffset? changedAt = null,
-        string? previousAssigneeName = null, string? previousDepartmentName = null)
+        string? previousAssigneeName = null, string? previousDepartmentName = null, string? note = null)
     {
-        var raw = $"{snapshot.Code}|{type}|{previous}|{snapshot.Status}|{email?.Id}|{discriminator}";
+        var emailIdentity = type == TicketEventType.EmailReceived
+            ? email?.Id ?? email?.SentAt?.ToString("O")
+            : null;
+        var raw = type is TicketEventType.StatusChanged or TicketEventType.Terminal
+            ? $"{snapshot.Code}|{type}|{previous}|{snapshot.Status}"
+            : type == TicketEventType.EmailReceived
+                ? $"{snapshot.Code}|{type}|{emailIdentity}"
+                : $"{snapshot.Code}|{type}|{previous}|{snapshot.Status}|{emailIdentity}|{discriminator}";
         return new TicketEvent
         {
             EventKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))),
             TicketCode = snapshot.Code, EventType = type, PreviousStatus = previous,
             CurrentStatus = snapshot.Status, DetectedAt = DateTimeOffset.Now, Reason = reason,
             ChangedBy = changedBy, ChangedAt = changedAt, PreviousAssigneeName = previousAssigneeName,
-            PreviousDepartmentName = previousDepartmentName, LatestEmail = email, Snapshot = snapshot
+            PreviousDepartmentName = previousDepartmentName, LatestEmail = email, Note = note, Snapshot = snapshot
         };
     }
 }

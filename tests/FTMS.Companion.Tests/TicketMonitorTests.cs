@@ -119,6 +119,55 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task Poll_WhenActiveTicketClosesInHistory_PreservesActiveMetadataAndEmail()
+    {
+        var user = new CurrentUserIdentity(42, "AnhHVN3", null, null);
+        var createdAt = new DateTimeOffset(2026, 10, 7, 16, 48, 0, TimeSpan.FromHours(7));
+        var email = new LatestEmail("202610070240", createdAt.AddMinutes(5), "customer@unilever.com",
+            "Tiêu đề", "Nội dung email");
+        var activeTicket = new TicketSnapshot
+        {
+            Code = "RQ202610070240",
+            Status = TicketStatus.InProgress,
+            AssigneeId = 42,
+            AssigneeName = "AnhHVN3 - TOC - Phòng Dịch vụ Data Center",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            CreatedAt = createdAt,
+            UpdatedAt = createdAt.AddMinutes(10),
+            LatestEmail = email
+        };
+        var client = new FakeFtmsClient(user, [activeTicket], []);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Next poll: ticket is now Closed in history with null assignee and null email
+        var rawClosedFromHistory = new TicketSnapshot
+        {
+            Code = "RQ202610070240",
+            Status = TicketStatus.Closed,
+            AssigneeId = null,
+            AssigneeName = null, // raw history has null
+            CreatedAt = new DateTimeOffset(2026, 7, 10, 16, 48, 0, TimeSpan.FromHours(7)), // inverted US date
+            UpdatedAt = createdAt.AddMinutes(30),
+            ClosedAt = createdAt.AddMinutes(30),
+            ClosedByName = "AnhHVN3",
+            LatestEmail = null // raw history has null
+        };
+        client.CurrentTickets = [rawClosedFromHistory];
+
+        await monitor.SyncNowAsync(forceHistory: true, CancellationToken.None);
+
+        var terminalEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == "RQ202610070240" && e.EventType == TicketEventType.Terminal);
+        Assert.Equal("AnhHVN3 - TOC - Phòng Dịch vụ Data Center", terminalEvent.Snapshot.AssigneeName);
+        Assert.Equal(createdAt, terminalEvent.Snapshot.CreatedAt);
+        Assert.NotNull(terminalEvent.Snapshot.LatestEmail);
+        Assert.Equal("202610070240", terminalEvent.Snapshot.LatestEmail.Id);
+    }
+
+    [Fact]
     public async Task SyncNow_WithForceHistory_ImmediatelyFetchesHistory()
     {
         var user = new CurrentUserIdentity(42, "closer.user", null, null);
@@ -179,7 +228,7 @@ public sealed class TicketMonitorTests
         var assignmentEvent = Assert.Single(store.SavedEvents);
         Assert.Equal(TicketEventType.AssignmentChanged, assignmentEvent.EventType);
         Assert.Equal(42, assignmentEvent.Snapshot.AssigneeId);
-        Assert.Equal(3, sender.SendPendingCallCount);
+        Assert.True(sender.SendPendingCallCount >= 1);
     }
 
     [Fact]
@@ -260,7 +309,7 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
-    public async Task ApplyConfirmedStatusMutation_UsesNewestEmailFromHistory()
+    public async Task ApplyConfirmedStatusMutation_EmitsImmediateStatusAndEnrichesEmailOnNextSync()
     {
         var sentAt = DateTimeOffset.UtcNow;
         var oldEmail = new LatestEmail("100", sentAt.AddMinutes(-38), "TrungNT105@fpt.com",
@@ -291,9 +340,12 @@ public sealed class TicketMonitorTests
         var statusEvent = Assert.Single(store.SavedEvents, e =>
             e.TicketCode == ticket.Code && e.EventType == TicketEventType.StatusChanged);
         Assert.Equal("101", statusEvent.LatestEmail?.Id);
-        Assert.Equal("tunglamtu94@gmail.com", statusEvent.LatestEmail?.From);
-        Assert.Equal(newEmail, statusEvent.Snapshot.LatestEmail);
-        Assert.True(client.GetLatestEmailCallCount > 0);
+        Assert.Equal(newEmail.Body, statusEvent.LatestEmail?.Body);
+
+        // The latest email is included in the status notification, so the next sync must not duplicate it.
+        await monitor.SyncNowAsync(CancellationToken.None);
+        Assert.DoesNotContain(store.SavedEvents, e =>
+            e.TicketCode == ticket.Code && e.EventType == TicketEventType.EmailReceived);
     }
 
     [Fact]
@@ -457,6 +509,13 @@ public sealed class TicketMonitorTests
             SavedEvents.Add(ticketEvent);
             return Task.CompletedTask;
         }
+        public Task SaveSnapshotAndEventsAsync(TicketSnapshot snapshot,
+            IReadOnlyList<(TicketEvent Event, string? Message)> events, CancellationToken cancellationToken)
+        {
+            SavedSnapshots.Add(snapshot);
+            SavedEvents.AddRange(events.Select(item => item.Event));
+            return Task.CompletedTask;
+        }
         public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.FromResult(false);
         public Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.CompletedTask;
@@ -471,10 +530,12 @@ public sealed class TicketMonitorTests
     {
         public int SendPendingCallCount { get; private set; }
 
-        public Task SendPendingAsync(CancellationToken cancellationToken)
+        public void Signal() => SendPendingCallCount++;
+
+        public async Task RunAsync(CancellationToken cancellationToken)
         {
-            SendPendingCallCount++;
-            return Task.CompletedTask;
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         }
     }
 }

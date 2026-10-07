@@ -27,6 +27,8 @@ public interface ITicketStore
     Task<bool> EventExistsAsync(string eventKey, CancellationToken cancellationToken);
     Task EnqueueNotificationAsync(TicketEvent ticketEvent, string message, CancellationToken cancellationToken);
     Task SaveEventAndEnqueueNotificationAsync(TicketEvent ticketEvent, string? message, CancellationToken cancellationToken);
+    Task SaveSnapshotAndEventsAsync(TicketSnapshot snapshot,
+        IReadOnlyList<(TicketEvent Event, string? Message)> events, CancellationToken cancellationToken);
     Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken);
     Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken);
     Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken);
@@ -35,5 +37,6 @@ public interface ITicketStore
 
 public interface INotificationSender
 {
-    Task SendPendingAsync(CancellationToken cancellationToken);
+    void Signal();
+    Task RunAsync(CancellationToken cancellationToken);
 }

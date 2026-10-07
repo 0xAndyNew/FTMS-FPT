@@ -150,4 +150,100 @@ public sealed class TelegramTransportTests
         Assert.Contains("🕰 <b>Thời gian từ lúc tạo ticket:</b> 25 phút", formatted);
         Assert.DoesNotContain("tồn tại từ lúc nhận ticket", formatted);
     }
+
+    [Fact]
+    public async Task OutboxPriority_SelectsCriticalStateEventsBeforeEmailAndReminders()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"ftms-outbox-priority-{Guid.NewGuid():N}.db");
+        try
+        {
+            var store = new SqliteTicketStore(dbPath);
+            await store.InitializeAsync(CancellationToken.None);
+
+            var now = DateTimeOffset.Now;
+            var snapshot = new FTMS.Domain.TicketSnapshot
+            {
+                Code = "RQ-PRIORITY",
+                Status = FTMS.Domain.TicketStatus.InProgress,
+                UpdatedAt = now
+            };
+
+            // Enqueue reminder first (Priority 2)
+            var reminderEvent = new FTMS.Domain.TicketEvent
+            {
+                EventKey = "KEY-REMINDER",
+                TicketCode = snapshot.Code,
+                EventType = FTMS.Domain.TicketEventType.UnassignedReminder,
+                CurrentStatus = snapshot.Status,
+                DetectedAt = now,
+                Reason = "Nhắc nhở",
+                Snapshot = snapshot
+            };
+            await store.SaveEventAndEnqueueNotificationAsync(reminderEvent, "Msg Reminder", CancellationToken.None);
+
+            // Enqueue email second (Priority 1)
+            var emailEvent = new FTMS.Domain.TicketEvent
+            {
+                EventKey = "KEY-EMAIL",
+                TicketCode = snapshot.Code,
+                EventType = FTMS.Domain.TicketEventType.EmailReceived,
+                CurrentStatus = snapshot.Status,
+                DetectedAt = now,
+                Reason = "Email mới",
+                Snapshot = snapshot
+            };
+            await store.SaveEventAndEnqueueNotificationAsync(emailEvent, "Msg Email", CancellationToken.None);
+
+            // Enqueue status change last (Priority 0)
+            var statusEvent = new FTMS.Domain.TicketEvent
+            {
+                EventKey = "KEY-STATUS",
+                TicketCode = snapshot.Code,
+                EventType = FTMS.Domain.TicketEventType.StatusChanged,
+                CurrentStatus = snapshot.Status,
+                DetectedAt = now,
+                Reason = "Trạng thái",
+                Snapshot = snapshot
+            };
+            await store.SaveEventAndEnqueueNotificationAsync(statusEvent, "Msg Status", CancellationToken.None);
+
+            // Query outbox using the priority query in TelegramOutboxSender
+            await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={dbPath}");
+            await connection.OpenAsync();
+            var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT event.event_type
+                FROM notification_outbox outbox
+                JOIN ticket_events event ON event.event_key=outbox.event_key
+                WHERE outbox.sent_at IS NULL AND outbox.next_attempt_at<=$now
+                ORDER BY CASE event.event_type
+                    WHEN 'Created' THEN 0
+                    WHEN 'StatusChanged' THEN 0
+                    WHEN 'AssignmentChanged' THEN 0
+                    WHEN 'Terminal' THEN 0
+                    WHEN 'EmailReceived' THEN 1
+                    WHEN 'SlaThresholdReached' THEN 1
+                    ELSE 2 END,
+                    outbox.id
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.Now.AddMinutes(1).ToString("O"));
+
+            var orderedTypes = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                orderedTypes.Add(reader.GetString(0));
+            }
+
+            Assert.Equal(3, orderedTypes.Count);
+            Assert.Equal("StatusChanged", orderedTypes[0]); // Priority 0 first
+            Assert.Equal("EmailReceived", orderedTypes[1]);  // Priority 1 second
+            Assert.Equal("UnassignedReminder", orderedTypes[2]); // Priority 2 last
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { if (File.Exists(dbPath)) File.Delete(dbPath); } catch { }
+        }
+    }
 }

@@ -116,6 +116,7 @@ public partial class CompactWindow : Window
         BlockFtmsBot(FtmsWebView.CoreWebView2, environment);
         BlockFtmsBot(MonitorWebView.CoreWebView2, environment);
         FtmsWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+        FtmsWebView.CoreWebView2.AddWebResourceRequestedFilter("https://ftms.fpt.net/*", CoreWebView2WebResourceContext.All);
         FtmsWebView.CoreWebView2.WebResourceResponseReceived += OnVisibleFtmsResponseReceived;
         FtmsWebView.CoreWebView2.NavigationStarting += (_, args) =>
         {
@@ -162,12 +163,18 @@ public partial class CompactWindow : Window
             if (payload.RootElement.ValueKind != JsonValueKind.Object ||
                 !payload.RootElement.TryGetProperty("type", out var type)) return;
             var mutationType = type.GetString();
+            if (mutationType == "ftms-general-mutation")
+            {
+                _monitor?.TriggerSync();
+                return;
+            }
             if (mutationType is not ("ftms-status-mutation" or "ftms-assignment-mutation")) return;
             var code = payload.RootElement.TryGetProperty("code", out var codeValue) ? codeValue.GetString() : null;
             if (string.IsNullOrWhiteSpace(code)) return;
             var detectedAt = payload.RootElement.TryGetProperty("detectedAt", out var detectedValue) && detectedValue.TryGetInt64(out var parsedAt)
                 ? parsedAt : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var actor = payload.RootElement.TryGetProperty("actor", out var actorValue) ? actorValue.GetString() : null;
+            var note = payload.RootElement.TryGetProperty("note", out var noteVal) ? noteVal.GetString() : null;
             if (mutationType == "ftms-assignment-mutation")
             {
                 if (!payload.RootElement.TryGetProperty("assigneeId", out var assigneeValue) ||
@@ -176,7 +183,7 @@ public partial class CompactWindow : Window
                 TicketStatus? assignmentStatus = null;
                 if (payload.RootElement.TryGetProperty("status", out var stVal) && stVal.TryGetInt32(out var parsedSt) && Enum.IsDefined(typeof(TicketStatus), parsedSt))
                     assignmentStatus = (TicketStatus)parsedSt;
-                QueueAssignmentMutationSync(code, assigneeId, assigneeName, actor, assignmentStatus);
+                QueueAssignmentMutationSync(code, assigneeId, assigneeName, actor, assignmentStatus, detectedAt);
                 return;
             }
             if (!payload.RootElement.TryGetProperty("status", out var statusValue) ||
@@ -184,28 +191,36 @@ public partial class CompactWindow : Window
             TicketStatus? prevStatus = null;
             if (payload.RootElement.TryGetProperty("previousStatus", out var prevVal) && prevVal.TryGetInt32(out var parsedPrev) && Enum.IsDefined(typeof(TicketStatus), parsedPrev))
                 prevStatus = (TicketStatus)parsedPrev;
-            QueueStatusMutationSync(code, (TicketStatus)status, prevStatus, actor, detectedAt);
+            QueueStatusMutationSync(code, (TicketStatus)status, prevStatus, actor, note, detectedAt);
         }
         catch (Exception ex) { MonitorText.Text = $"L\u1ed7i \u0111\u1ed3ng b\u1ed9 th\u1eddi gian th\u1ef1c: {ex.Message}"; }
     }
 
-    private void QueueStatusMutationSync(string code, TicketStatus expectedStatus, TicketStatus? previousStatus, string? actor, long detectedAt)
+    private void QueueStatusMutationSync(string code, TicketStatus expectedStatus, TicketStatus? previousStatus, string? actor, string? note, long detectedAt)
     {
         QueueMutationSync(async (monitor, cancellationToken) =>
         {
-            await monitor.ApplyConfirmedStatusMutationAsync(code, expectedStatus, previousStatus, actor, cancellationToken);
-            await monitor.SyncUntilStatusAsync(code, expectedStatus, cancellationToken);
+            var mutationTime = DateTimeOffset.FromUnixTimeMilliseconds(detectedAt)
+                .ToOffset(TimeSpan.FromHours(7));
+            await monitor.ApplyConfirmedStatusMutationAsync(code, expectedStatus, previousStatus,
+                actor, cancellationToken, mutationTime, note);
             if (monitor.TryGetTrackedStatus(code, out var status) && status == expectedStatus) return;
+            await monitor.SyncUntilStatusAsync(code, expectedStatus, cancellationToken);
+            if (monitor.TryGetTrackedStatus(code, out status) && status == expectedStatus) return;
             await Dispatcher.InvokeAsync(() => MonitorText.Text =
-                $"\u0110ang ch\u1edd FTMS x\u00e1c nh\u1eadn {code} \u2192 {expectedStatus.DisplayName()} ({detectedAt}).");
+                $"\u0110ang ch\u1edd FTMS x\u00e1c nh\u1eadn {code} \u2192 {expectedStatus.DisplayName()} ({mutationTime:HH:mm:ss}).");
         });
     }
 
-    private void QueueAssignmentMutationSync(string code, long expectedAssigneeId, string? expectedAssigneeName, string? actor, TicketStatus? status)
+    private void QueueAssignmentMutationSync(string code, long expectedAssigneeId, string? expectedAssigneeName, string? actor, TicketStatus? status, long detectedAt)
     {
         QueueMutationSync(async (monitor, cancellationToken) =>
         {
-            await monitor.ApplyConfirmedAssignmentMutationAsync(code, expectedAssigneeId, expectedAssigneeName, actor, status, cancellationToken);
+            var mutationTime = DateTimeOffset.FromUnixTimeMilliseconds(detectedAt)
+                .ToOffset(TimeSpan.FromHours(7));
+            await monitor.ApplyConfirmedAssignmentMutationAsync(code, expectedAssigneeId,
+                expectedAssigneeName, actor, status, cancellationToken, mutationTime);
+            if (monitor.TryGetTrackedStatus(code, out var curStatus) && (status is null || curStatus == status.Value)) return;
             await monitor.SyncUntilAssignmentAsync(code, expectedAssigneeId, cancellationToken);
         });
     }
@@ -232,10 +247,22 @@ public partial class CompactWindow : Window
         if (!Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out var uri) ||
             !string.Equals(uri.Host, "ftms.fpt.net", StringComparison.OrdinalIgnoreCase)) return;
         var path = uri.AbsolutePath;
-        if (!path.Contains("GetListRequestV12", StringComparison.OrdinalIgnoreCase) &&
-            !path.Contains("GetListCasesV12", StringComparison.OrdinalIgnoreCase) &&
-            !path.Contains("GetListAlarm", StringComparison.OrdinalIgnoreCase) &&
-            !path.Contains("GetListCasesRequest", StringComparison.OrdinalIgnoreCase)) return;
+        var isListResponse = path.Contains("GetListRequestV12", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("GetListCasesV12", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("GetListAlarm", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("GetListCasesRequest", StringComparison.OrdinalIgnoreCase);
+        var isMutationResponse = path.Contains("ChangeStatus", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("UpdateStatus", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("CloseTicket", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("TakeAndAssignment", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("SendMail", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("SendEmail", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("Reply", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("Save", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("Update", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith("/Assign", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith("/Assignment", StringComparison.OrdinalIgnoreCase);
+        if (!isListResponse && !isMutationResponse) return;
 
         if (_activeAccountId != accountId) return;
         monitor.TriggerSync();
