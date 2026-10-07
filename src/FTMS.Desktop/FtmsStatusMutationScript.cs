@@ -10,7 +10,7 @@ internal static class FtmsStatusMutationScript
           const nativeFetch = window.fetch;
           const NativeXMLHttpRequest = window.XMLHttpRequest;
           const statusEndpointPattern = /^\/ihub\/(?:request|incident|case|problem|cr|changerequest|[a-z0-9_-]+)\/(?:changestatus|updatestatus|closeticket|close)(?:v\d+)?\/?$/i;
-          const assignmentEndpointPattern = /^\/ihub\/(?:request|incident|case|problem|cr|changerequest|[a-z0-9_-]+)\/takeandassignment(?:v\d+)?\/?$/i;
+          const assignmentEndpointPattern = /^\/ihub\/(?:request|incident|case|problem|cr|changerequest|[a-z0-9_-]+)\/(?:takeandassignment|assign|assignment)(?:v\d+)?\/?$/i;
           const endpointType = value => {
             try {
               const url = new URL(String(value || ''), location.href);
@@ -56,29 +56,41 @@ internal static class FtmsStatusMutationScript
             return 0;
           };
           const succeeded = payload => {
-            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
-            if (payload.success === false || payload.result === false || payload.ok === false ||
-                Number(payload.code) >= 400 || payload.error) return false;
-            const message = String(payload.message?.value ?? payload.message ?? '');
-            return Number(payload.code) === 200 || Number(payload.status) === 200 ||
-              payload.success === true || payload.result === true || payload.result === 1 || payload.ok === true ||
-              String(payload.status || '').toLowerCase() === 'ok' ||
-              /cap nhat thanh cong|cập nhật thành công|success|completed|done/i.test(message);
+            if (!payload) return false;
+            if (typeof payload === 'string') {
+              try { payload = JSON.parse(payload); } catch { return /thành công|success|completed|ok/i.test(payload); }
+            }
+            if (typeof payload !== 'object' || Array.isArray(payload)) return false;
+            const p = k => payload[k] ?? payload[k.toLowerCase()] ?? payload[k.toUpperCase()] ??
+              payload[k.charAt(0).toUpperCase() + k.slice(1)];
+            const success = p('success'), result = p('result'), ok = p('ok'), err = p('error');
+            const code = Number(p('code')), status = p('status');
+            if (success === false || result === false || ok === false || code >= 400 || err) return false;
+            const message = String(payload.message?.value ?? payload.message ?? payload.Message ?? '');
+            return code === 200 || status === 200 || Number(status) === 200 ||
+              success === true || result === true || result === 1 || String(result) === '1' || String(result).toLowerCase() === 'true' ||
+              ok === true || String(status || '').toLowerCase() === 'ok' ||
+              /cap nhat thanh cong|cập nhật thành công|thành công|success|completed|done/i.test(message);
           };
           const notify = (url, body, payload) => {
             try {
               if (!succeeded(payload)) return;
               const mutationType = endpointType(url);
               const entries = entriesOf(body);
-              const code = read(entries, ['code','input[code]','ticketCode','requestCode']) ||
+              const code = read(entries, ['code','input[code]','ticketCode','requestCode','caseCode']) ||
                 location.pathname.match(/(?:RQ|CA|IN|PR|CR)[A-Z0-9_-]+/i)?.[0] || '';
               if (!/^(?:RQ|CA|IN|PR|CR)[A-Z0-9_-]+$/i.test(code)) return;
+              const actor = read(entries, ['staffName','creator','input[staffName]','input[creator]','updatedBy']) ||
+                String(globalThis.Username || '');
               if (mutationType === 'assignment') {
                 const assigneeId = Number(read(entries, ['staffId','staff_ID','input[staffId]','input[staff_ID]',
-                  'assigneeId','agentId']));
+                  'assigneeId','agentId']) || (typeof globalThis.userID !== 'undefined' ? globalThis.userID : 0));
+                const assigneeName = read(entries, ['staffName','input[staffName]','assigneeName']) || actor;
+                const status = statusOf(read(entries, ['input[ticketStatus]','ticketStatus','status','statusCode']));
                 if (!Number.isInteger(assigneeId) || assigneeId <= 0) return;
                 window.chrome?.webview?.postMessage({
-                  type: 'ftms-assignment-mutation', code: code.toUpperCase(), assigneeId,
+                  type: 'ftms-assignment-mutation', code: code.toUpperCase(), assigneeId, assigneeName, actor,
+                  status: status || undefined,
                   detectedAt: Date.now()
                 });
                 return;
@@ -89,7 +101,7 @@ internal static class FtmsStatusMutationScript
                 'previousStatusCode','fromStatus','input[oldStatus]','input[oldStatusCode]']));
               if (!status) return;
               window.chrome?.webview?.postMessage({
-                type: 'ftms-status-mutation', code: code.toUpperCase(), status, previousStatus,
+                type: 'ftms-status-mutation', code: code.toUpperCase(), status, previousStatus, actor,
                 detectedAt: Date.now()
               });
             } catch { }

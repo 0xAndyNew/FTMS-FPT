@@ -17,7 +17,10 @@ public sealed class TicketChangeDetector
             {
                 if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
                     snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused) continue;
-                var initialEmail = await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken);
+                var initialEmail = IsCompleteEmail(snapshot.LatestEmail)
+                    ? snapshot.LatestEmail
+                    : await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken,
+                        retryWhenMissing: snapshot.LatestEmail is not null);
                 var email = SelectEmail(initialEmail, snapshot.LatestEmail);
                 var enriched = snapshot with { LatestEmail = email };
                 events.Add(Create(enriched, TicketEventType.Created, null, "Phát hiện ticket mới", email));
@@ -34,19 +37,15 @@ public sealed class TicketChangeDetector
             async Task<LatestEmail?> LatestEmailAsync(bool retryWhenMissing = true)
             {
                 if (emailFetched) return fetchedEmail;
-                fetchedEmail = SelectEmail(await FetchLatestEmailAsync(client, snapshot.Code, cancellationToken, retryWhenMissing),
-                    snapshot.LatestEmail, old.LatestEmail);
+                fetchedEmail = await ResolveLatestEmailAsync(client, snapshot.Code, cancellationToken,
+                    retryWhenMissing, true, snapshot.LatestEmail, old.LatestEmail);
                 emailFetched = true;
                 return fetchedEmail;
             }
 
             if (old.Status != snapshot.Status)
             {
-                var emailTask = (old.LatestEmail is not null && !old.LatestEmail.IsExcluded() &&
-                    !string.IsNullOrWhiteSpace(old.LatestEmail.Body) &&
-                    (snapshot.LatestEmail is null || snapshot.LatestEmail.Id == old.LatestEmail.Id))
-                    ? Task.FromResult<LatestEmail?>(old.LatestEmail)
-                    : LatestEmailAsync();
+                var emailTask = LatestEmailAsync();
                 var historyTask = LatestStatusHistoryAsync();
                 await Task.WhenAll(emailTask, historyTask);
                 var email = await emailTask;
@@ -72,11 +71,7 @@ public sealed class TicketChangeDetector
             if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) &&
                 (old.AssigneeId != snapshot.AssigneeId || old.DepartmentId != snapshot.DepartmentId))
             {
-                var email = (old.LatestEmail is not null && !old.LatestEmail.IsExcluded() &&
-                    !string.IsNullOrWhiteSpace(old.LatestEmail.Body) &&
-                    (snapshot.LatestEmail is null || snapshot.LatestEmail.Id == old.LatestEmail.Id))
-                    ? old.LatestEmail
-                    : await LatestEmailAsync(retryWhenMissing: snapshot.LatestEmail is not null);
+                var email = await LatestEmailAsync(retryWhenMissing: snapshot.LatestEmail is not null);
                 var enriched = snapshot with { LatestEmail = email };
                 var discriminator = $"{old.AssigneeId}>{snapshot.AssigneeId}|{old.DepartmentId}>{snapshot.DepartmentId}";
                 events.Add(Create(enriched, TicketEventType.AssignmentChanged, old.Status, "Người xử lý hoặc phòng ban đã thay đổi",
@@ -189,37 +184,33 @@ public sealed class TicketChangeDetector
             (!long.TryParse(current.Id, out var currentId) || !long.TryParse(old.Id, out var oldId) || currentId > oldId);
     }
 
+    internal static async Task<LatestEmail?> ResolveLatestEmailAsync(IFtmsClient client, string code,
+        CancellationToken cancellationToken, bool retryWhenMissing = true, bool retryWhenUnchanged = false,
+        params LatestEmail?[] cachedCandidates)
+    {
+        var cachedLatest = SelectEmail(cachedCandidates);
+        var fetched = await FetchLatestEmailAsync(client, code, cancellationToken, retryWhenMissing,
+            retryWhenUnchanged ? cachedLatest : null);
+        return SelectEmail(fetched, cachedLatest);
+    }
+
     private static async Task<LatestEmail?> FetchLatestEmailAsync(IFtmsClient client, string code, CancellationToken ct,
-        bool retryWhenMissing = true)
+        bool retryWhenMissing = true, LatestEmail? retryWhenSameAs = null)
     {
         var first = await client.GetLatestEmailAsync(code, ct);
-        if (Complete(first) || first is null && !retryWhenMissing) return first;
+        var shouldRetry = !IsCompleteEmail(first) && (first is not null || retryWhenMissing) ||
+            retryWhenSameAs is not null && !IsNewEmail(retryWhenSameAs, first);
+        if (!shouldRetry) return first;
 
         await Task.Delay(300, ct);
         var retry = await client.GetLatestEmailAsync(code, ct);
-        if (retry is null) return first;
-        if (first is null) return retry;
-        if (first.SentAt is not null && retry.SentAt is not null && retry.SentAt < first.SentAt)
-            return first;
-        if (first.SentAt is not null && retry.SentAt is not null && retry.SentAt > first.SentAt)
-            return retry;
-        if (long.TryParse(first.Id, out var firstId) && long.TryParse(retry.Id, out var retryId))
-        {
-            if (retryId < firstId) return first;
-            if (retryId > firstId) return retry;
-        }
-        return Completeness(retry) >= Completeness(first) ? retry : first;
-
-        static bool Complete(LatestEmail? email) => email is not null &&
-            !string.IsNullOrWhiteSpace(email.From) && email.SentAt is not null &&
-            !string.IsNullOrWhiteSpace(email.Body) && !IsTruncatedPreview(email.Body);
-        static int Completeness(LatestEmail email) =>
-            (string.IsNullOrWhiteSpace(email.From) ? 0 : 1) +
-            (email.SentAt is null ? 0 : 1) +
-            (string.IsNullOrWhiteSpace(email.Subject) ? 0 : 1) +
-            (string.IsNullOrWhiteSpace(email.Body) ? 0 : 1) +
-            (!string.IsNullOrWhiteSpace(email.Body) && !IsTruncatedPreview(email.Body) ? 1 : 0);
+        return SelectEmail(first, retry);
     }
+
+    private static bool IsCompleteEmail(LatestEmail? email) => email is not null &&
+        !email.IsExcluded() &&
+        !string.IsNullOrWhiteSpace(email.From) && email.SentAt is not null &&
+        !string.IsNullOrWhiteSpace(email.Body) && !IsTruncatedPreview(email.Body);
 
     private static bool IsTruncatedPreview(string? body)
     {
@@ -241,11 +232,10 @@ public sealed class TicketChangeDetector
         var valid = candidates.Where(email => email is not null && !email.IsExcluded()).Select(email => email!).ToList();
         if (valid.Count == 0) return null;
 
-        var fetched = valid.FirstOrDefault(e => ReferenceEquals(e, candidates.FirstOrDefault()));
-        if (fetched is not null && !string.IsNullOrWhiteSpace(fetched.Body) && !IsTruncatedPreview(fetched.Body))
-            return fetched;
-
-        var newest = valid.OrderByDescending(e => e.SentAt).First();
+        var newest = valid
+            .OrderByDescending(e => e.SentAt)
+            .ThenByDescending(e => long.TryParse(e.Id, out var id) ? id : 0)
+            .First();
         var fullMatchForNewest = valid
             .Where(e => !string.IsNullOrWhiteSpace(e.Body) && !IsTruncatedPreview(e.Body) &&
                 (!string.IsNullOrWhiteSpace(e.Id) && string.Equals(e.Id, newest.Id, StringComparison.OrdinalIgnoreCase) ||

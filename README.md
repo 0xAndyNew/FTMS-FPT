@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.18`
+- **Phiên bản:** `1.0.20`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -297,7 +297,7 @@ Bảng `notification_outbox` đặt ràng buộc `UNIQUE(event_key)`. Nếu sự
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.18.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.20.exe`.
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 
@@ -351,7 +351,7 @@ Chạy script PowerShell đi kèm để tự động publish single-file và đ�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
-Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.18.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
+Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.20.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
 
 ---
 
@@ -369,11 +369,12 @@ dotnet test
 Test run for D:\FTMS-FPT\tests\FTMS.Companion.Tests\bin\Debug\net8.0\FTMS.Companion.Tests.dll (.NETCoreApp,Version=v8.0)
 A total of 1 test files matched the specified pattern.
 
-Passed!  - Failed: 0, Passed: 25, Skipped: 0, Total: 25, Duration: 2 s
+Passed!  - Failed: 0, Passed: 52, Skipped: 0, Total: 52, Duration: 27 s
 ```
 
 ### Các nhóm kiểm thử chính:
-- `TicketMonitorTests`: Kiểm tra việc tính toán thống kê dashboard, đếm ticket đóng hôm nay theo người dùng, đảm bảo cơ chế dọn dẹp chỉ kích hoạt đúng 1 lần/ngày.
+- `TicketMonitorTests`: Kiểm tra thống kê dashboard, đồng bộ tức thì trạng thái/nhận ticket, email mới nhất và cơ chế dọn dẹp hằng ngày.
+- `NotificationFormatterEmailTests`: Kiểm tra chọn email mới nhất, lấy đầy đủ thân thư và làm sạch nội dung thông báo.
 - `SqliteTicketStoreTests`: Kiểm tra việc lưu trữ snapshot, cơ chế dọn dẹp ticket đã đóng các ngày trước nhưng bảo tồn ticket đang mở và ticket đóng hôm nay.
 - `TelegramCallbackReceiverTests`: Kiểm tra cơ chế xử lý callback nhận ticket, quản lý offset theo từng Bot Token, đảm bảo retry an toàn khi gặp lỗi xác thực hoặc mạng.
 - `TelegramTransportTests`: Kiểm tra parser HTTP Proxy, khả năng thay đổi proxy lúc runtime, kiểm tra bộ lọc khử token Telegram trong thông báo lỗi (`Sanitizer`).
@@ -425,4 +426,4 @@ Thư mục này bao gồm:
 
 ---
 
-*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 06/10/2026 cho phiên bản FTMS Companion 1.0.18.*
+*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 07/10/2026 cho phiên bản FTMS Companion 1.0.20.*

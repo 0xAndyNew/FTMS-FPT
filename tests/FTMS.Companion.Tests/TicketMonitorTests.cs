@@ -219,6 +219,150 @@ public sealed class TicketMonitorTests
         Assert.Equal(TicketStatus.InProgress, transition.CurrentStatus);
     }
 
+    [Fact]
+    public async Task ApplyConfirmedStatusMutation_ImmediatelyEnqueuesEventAndPreventsRollback()
+    {
+        var ticket = new TicketSnapshot
+        {
+            Code = "RQ-MUT-STATUS",
+            Status = TicketStatus.InProgress,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 42,
+            AssigneeName = "duy.user"
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(42, "duy.user", null, null), [ticket]);
+        var store = new MemoryStore();
+        var sender = new NullSender();
+        var monitor = new TicketMonitor(client, store, sender, new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        var initialSendCount = sender.SendPendingCallCount;
+
+        // Technician changes status to Paused via browser
+        await monitor.ApplyConfirmedStatusMutationAsync(ticket.Code, TicketStatus.Paused, TicketStatus.InProgress, "duy.user", CancellationToken.None);
+
+        Assert.True(monitor.TryGetTrackedStatus(ticket.Code, out var currentStatus));
+        Assert.Equal(TicketStatus.Paused, currentStatus);
+        Assert.True(sender.SendPendingCallCount > initialSendCount);
+        var statusEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == ticket.Code && e.EventType == TicketEventType.StatusChanged);
+        Assert.Equal(TicketStatus.Paused, statusEvent.CurrentStatus);
+        Assert.Equal(TicketStatus.InProgress, statusEvent.PreviousStatus);
+        Assert.Equal("duy.user", statusEvent.ChangedBy);
+
+        // Subsequent poll where FTMS API still returns old status (eventual consistency)
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Must NOT roll back to InProgress and must NOT emit duplicate events
+        Assert.True(monitor.TryGetTrackedStatus(ticket.Code, out var preservedStatus));
+        Assert.Equal(TicketStatus.Paused, preservedStatus);
+        Assert.Single(store.SavedEvents, e => e.TicketCode == ticket.Code && e.EventType == TicketEventType.StatusChanged);
+    }
+
+    [Fact]
+    public async Task ApplyConfirmedStatusMutation_UsesNewestEmailFromHistory()
+    {
+        var sentAt = DateTimeOffset.UtcNow;
+        var oldEmail = new LatestEmail("100", sentAt.AddMinutes(-38), "TrungNT105@fpt.com",
+            "Tiêu đề kiểm thử", "Nội dung phản hồi cũ");
+        var newEmail = new LatestEmail("101", sentAt, "tunglamtu94@gmail.com",
+            "Tiêu đề kiểm thử", "Nội dung phản hồi mới nhất");
+        var ticket = new TicketSnapshot
+        {
+            Code = "RQ202610070261",
+            Status = TicketStatus.Paused,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 42,
+            AssigneeName = "HieuDX2",
+            LatestEmail = oldEmail
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(42, "HieuDX2", null, null), [ticket])
+        {
+            LatestEmail = newEmail
+        };
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        await monitor.ApplyConfirmedStatusMutationAsync(ticket.Code, TicketStatus.InProgress,
+            TicketStatus.Paused, "HieuDX2", CancellationToken.None);
+
+        var statusEvent = Assert.Single(store.SavedEvents, e =>
+            e.TicketCode == ticket.Code && e.EventType == TicketEventType.StatusChanged);
+        Assert.Equal("101", statusEvent.LatestEmail?.Id);
+        Assert.Equal("tunglamtu94@gmail.com", statusEvent.LatestEmail?.From);
+        Assert.Equal(newEmail, statusEvent.Snapshot.LatestEmail);
+        Assert.True(client.GetLatestEmailCallCount > 0);
+    }
+
+    [Fact]
+    public async Task ApplyConfirmedAssignmentMutation_ImmediatelyEnqueuesAssignmentEventAndPreventsRollback()
+    {
+        var ticket = new TicketSnapshot
+        {
+            Code = "RQ-MUT-CLAIM",
+            Status = TicketStatus.Assigned,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(42, "duy.user", null, null), [ticket]);
+        var store = new MemoryStore();
+        var sender = new NullSender();
+        var monitor = new TicketMonitor(client, store, sender, new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        var initialSendCount = sender.SendPendingCallCount;
+
+        // Technician claims ticket in browser
+        await monitor.ApplyConfirmedAssignmentMutationAsync(ticket.Code, 42, "duy.user", "duy.user", TicketStatus.InProgress, CancellationToken.None);
+
+        Assert.True(monitor.TryGetTrackedStatus(ticket.Code, out var currentStatus));
+        Assert.Equal(TicketStatus.InProgress, currentStatus);
+        Assert.True(sender.SendPendingCallCount > initialSendCount);
+        var claimEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == ticket.Code && e.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(42, claimEvent.Snapshot.AssigneeId);
+        Assert.Equal("duy.user", claimEvent.Snapshot.AssigneeName);
+        Assert.Equal(TicketStatus.InProgress, claimEvent.CurrentStatus);
+
+        // Eventual consistency poll where FTMS API still returns unassigned
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Must NOT roll back
+        Assert.Single(store.SavedEvents, e => e.TicketCode == ticket.Code && e.EventType == TicketEventType.AssignmentChanged);
+    }
+
+    [Fact]
+    public async Task TriggerSync_WakesUpRunAsyncImmediatelyWithoutWaitingInterval()
+    {
+        var client = new FakeFtmsClient(null, []);
+        var settings = new AppSettings { PollIntervalSeconds = 60 };
+        var monitor = new TicketMonitor(client, new MemoryStore(), new NullSender(), new TicketChangeDetector(), settings);
+
+        using var cts = new CancellationTokenSource();
+        var runTask = monitor.RunAsync(cts.Token);
+
+        // Wait for first poll to complete
+        while (client.GetTicketsCallCount == 0)
+            await Task.Delay(20);
+
+        var countBeforeTrigger = client.GetTicketsCallCount;
+
+        // Trigger sync should wake RunAsync within milliseconds instead of 60s
+        monitor.TriggerSync();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (client.GetTicketsCallCount == countBeforeTrigger && sw.ElapsedMilliseconds < 2000)
+            await Task.Delay(20);
+
+        Assert.True(client.GetTicketsCallCount > countBeforeTrigger);
+
+        cts.Cancel();
+        try { await runTask; } catch (OperationCanceledException) { }
+    }
+
     private static TicketSnapshot Closed(string code, DateTimeOffset closedAt, long? closedById,
         string? closedByName, long? assigneeId) => new()
     {
@@ -245,6 +389,8 @@ public sealed class TicketMonitorTests
         public IReadOnlyList<TicketSnapshot> CurrentTickets { get; set; } = tickets;
         public IReadOnlyList<TicketSnapshot> CurrentClosedTickets { get; set; } = closedTickets ?? [];
         public Func<int, IReadOnlyList<TicketSnapshot>>? TicketsByCall { get; set; }
+        public LatestEmail? LatestEmail { get; set; }
+        public int GetLatestEmailCallCount { get; private set; }
 
         public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken) => Task.FromResult(true);
         public Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken) => Task.FromResult(user);
@@ -274,7 +420,11 @@ public sealed class TicketMonitorTests
 
         public Task<TicketClaimResult> ClaimTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken) =>
             Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok"));
-        public Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken) => Task.FromResult<LatestEmail?>(null);
+        public Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken)
+        {
+            GetLatestEmailCallCount++;
+            return Task.FromResult(LatestEmail);
+        }
         public Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken) =>
             Task.FromResult<StatusHistoryEntry?>(null);
         public Task BeginLoginRecoveryAsync(CancellationToken cancellationToken) => Task.CompletedTask;

@@ -167,24 +167,33 @@ public partial class CompactWindow : Window
             if (string.IsNullOrWhiteSpace(code)) return;
             var detectedAt = payload.RootElement.TryGetProperty("detectedAt", out var detectedValue) && detectedValue.TryGetInt64(out var parsedAt)
                 ? parsedAt : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var actor = payload.RootElement.TryGetProperty("actor", out var actorValue) ? actorValue.GetString() : null;
             if (mutationType == "ftms-assignment-mutation")
             {
                 if (!payload.RootElement.TryGetProperty("assigneeId", out var assigneeValue) ||
                     !assigneeValue.TryGetInt64(out var assigneeId) || assigneeId <= 0) return;
-                QueueAssignmentMutationSync(code, assigneeId);
+                var assigneeName = payload.RootElement.TryGetProperty("assigneeName", out var nameVal) ? nameVal.GetString() : null;
+                TicketStatus? assignmentStatus = null;
+                if (payload.RootElement.TryGetProperty("status", out var stVal) && stVal.TryGetInt32(out var parsedSt) && Enum.IsDefined(typeof(TicketStatus), parsedSt))
+                    assignmentStatus = (TicketStatus)parsedSt;
+                QueueAssignmentMutationSync(code, assigneeId, assigneeName, actor, assignmentStatus);
                 return;
             }
             if (!payload.RootElement.TryGetProperty("status", out var statusValue) ||
                 !statusValue.TryGetInt32(out var status) || !Enum.IsDefined(typeof(TicketStatus), status)) return;
-            QueueStatusMutationSync(code, (TicketStatus)status, detectedAt);
+            TicketStatus? prevStatus = null;
+            if (payload.RootElement.TryGetProperty("previousStatus", out var prevVal) && prevVal.TryGetInt32(out var parsedPrev) && Enum.IsDefined(typeof(TicketStatus), parsedPrev))
+                prevStatus = (TicketStatus)parsedPrev;
+            QueueStatusMutationSync(code, (TicketStatus)status, prevStatus, actor, detectedAt);
         }
         catch (Exception ex) { MonitorText.Text = $"L\u1ed7i \u0111\u1ed3ng b\u1ed9 th\u1eddi gian th\u1ef1c: {ex.Message}"; }
     }
 
-    private void QueueStatusMutationSync(string code, TicketStatus expectedStatus, long detectedAt)
+    private void QueueStatusMutationSync(string code, TicketStatus expectedStatus, TicketStatus? previousStatus, string? actor, long detectedAt)
     {
         QueueMutationSync(async (monitor, cancellationToken) =>
         {
+            await monitor.ApplyConfirmedStatusMutationAsync(code, expectedStatus, previousStatus, actor, cancellationToken);
             await monitor.SyncUntilStatusAsync(code, expectedStatus, cancellationToken);
             if (monitor.TryGetTrackedStatus(code, out var status) && status == expectedStatus) return;
             await Dispatcher.InvokeAsync(() => MonitorText.Text =
@@ -192,10 +201,13 @@ public partial class CompactWindow : Window
         });
     }
 
-    private void QueueAssignmentMutationSync(string code, long expectedAssigneeId)
+    private void QueueAssignmentMutationSync(string code, long expectedAssigneeId, string? expectedAssigneeName, string? actor, TicketStatus? status)
     {
-        QueueMutationSync((monitor, cancellationToken) =>
-            monitor.SyncUntilAssignmentAsync(code, expectedAssigneeId, cancellationToken));
+        QueueMutationSync(async (monitor, cancellationToken) =>
+        {
+            await monitor.ApplyConfirmedAssignmentMutationAsync(code, expectedAssigneeId, expectedAssigneeName, actor, status, cancellationToken);
+            await monitor.SyncUntilAssignmentAsync(code, expectedAssigneeId, cancellationToken);
+        });
     }
 
     private void QueueMutationSync(Func<TicketMonitor, CancellationToken, Task> sync)
@@ -226,9 +238,7 @@ public partial class CompactWindow : Window
             !path.Contains("GetListCasesRequest", StringComparison.OrdinalIgnoreCase)) return;
 
         if (_activeAccountId != accountId) return;
-        try { await Task.Run(() => monitor.SyncNowAsync(accountLifetime.Token)); }
-        catch (OperationCanceledException) when (accountLifetime.IsCancellationRequested) { }
-        catch (Exception ex) { MonitorText.Text = $"Lỗi đồng bộ FTMS: {ex.Message}"; }
+        monitor.TriggerSync();
     }
 
     private async void OnMonitorNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
@@ -577,7 +587,11 @@ public partial class CompactWindow : Window
         var result = await client.ClaimTicketAsync(code, activeAccountId, cancellationToken);
         if (result.IsSuccess && _activeAccountId == activeAccountId && _monitor is not null)
         {
-            try { await Task.Run(() => _monitor.SyncUntilAssignmentAsync(code, activeAccountId, accountLifetime.Token), accountLifetime.Token); }
+            try
+            {
+                await _monitor.ApplyConfirmedAssignmentMutationAsync(code, activeAccountId, null, null, null, accountLifetime.Token);
+                await Task.Run(() => _monitor.SyncUntilAssignmentAsync(code, activeAccountId, accountLifetime.Token), accountLifetime.Token);
+            }
             catch (OperationCanceledException) when (accountLifetime.IsCancellationRequested) { }
             catch (Exception ex) { MonitorText.Text = $"Đã nhận {code}, nhưng chưa đồng bộ được: {ex.Message}"; }
         }
