@@ -166,6 +166,7 @@ public partial class CompactWindow : Window
         _telegramReceiver = new TelegramCallbackReceiver(_stateDirectory,
             () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId),
             _http, ClaimTicketFromTelegramAsync,
+            PauseTicketFromTelegramAsync,
             HandleTelegramCommandAsync,
             message => Dispatcher.BeginInvoke(() => MonitorText.Text = TelegramErrorSanitizer.Sanitize(
                 message, _settingsStore.Current.TelegramToken)));
@@ -480,7 +481,8 @@ public partial class CompactWindow : Window
             var databasePath = Path.Combine(root, $"ftms-user-{accountId}.db");
             var settings = new AppSettings { FtmsUrl = FtmsUrl, PollIntervalSeconds = 2, IdleDelaySeconds = 0 };
             var telegram = new TelegramOutboxSender(databasePath,
-                () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _http);
+                () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _http,
+                getCurrentUserId: () => _activeAccountId);
             var monitor = new TicketMonitor(_ftmsClient, new SqliteTicketStore(databasePath),
                 telegram, new TicketChangeDetector(), settings);
             monitor.StatusChanged += message => Dispatcher.BeginInvoke(() =>
@@ -652,6 +654,30 @@ public partial class CompactWindow : Window
         return result;
     }
 
+    private async Task<TicketActionResult> PauseTicketFromTelegramAsync(string code, CancellationToken cancellationToken)
+    {
+        var accountId = _activeAccountId;
+        var accountLifetime = _accountLifetime;
+        var client = _ftmsClient;
+        if (accountId is not long activeAccountId || accountLifetime?.IsCancellationRequested != false || client is null)
+            return new TicketActionResult(TicketActionStatus.RetryableFailure, "FTMS Companion chưa sẵn sàng.");
+
+        var result = await client.PauseTicketAsync(code, activeAccountId, cancellationToken);
+        if (result.IsSuccess && _activeAccountId == activeAccountId && _monitor is not null)
+        {
+            try
+            {
+                var userName = _activeUser?.UserName;
+                await _monitor.ApplyConfirmedStatusMutationAsync(code, TicketStatus.Paused, TicketStatus.InProgress,
+                    userName, accountLifetime.Token, DateTimeOffset.UtcNow, "Hỗ trợ KH");
+                await Task.Run(() => _monitor.SyncUntilStatusAsync(code, TicketStatus.Paused, accountLifetime.Token), accountLifetime.Token);
+            }
+            catch (OperationCanceledException) when (accountLifetime.IsCancellationRequested) { }
+            catch (Exception ex) { MonitorText.Text = $"Đã tạm ngưng {code}, nhưng chưa đồng bộ được: {ex.Message}"; }
+        }
+        return result;
+    }
+
     private Task<TelegramCommandResponse?> HandleTelegramCommandAsync(string text, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(text) || !text.StartsWith('/'))
@@ -767,7 +793,15 @@ public partial class CompactWindow : Window
 
                     var route = t.Code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) || t.Code.StartsWith("AL", StringComparison.OrdinalIgnoreCase) ? "case" : "request";
                     var openUrl = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(t.Code)}";
-                    buttons.Add([new { text = $"🔎 Mở {t.Code}", url = openUrl }]);
+                    var isRq = !t.Code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) && !t.Code.StartsWith("AL", StringComparison.OrdinalIgnoreCase);
+                    if (isRq && t.Status == TicketStatus.InProgress)
+                    {
+                        buttons.Add([new { text = $"🔎 Mở {t.Code}", url = openUrl }, new { text = $"⏸️ Tạm ngưng {t.Code}", callback_data = $"pause:{t.Code}" }]);
+                    }
+                    else
+                    {
+                        buttons.Add([new { text = $"🔎 Mở {t.Code}", url = openUrl }]);
+                    }
                 }
 
                 if (personal.Count > maxDisplay)

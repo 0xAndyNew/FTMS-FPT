@@ -728,6 +728,239 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         return new TicketClaimResult(TicketClaimStatus.RetryableFailure, "Không đọc được kết quả nhận ticket từ FTMS.");
     }
 
+    public async Task<TicketActionResult> PauseTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken)
+    {
+        var normalizedCode = ticketCode?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(normalizedCode))
+            return new TicketActionResult(TicketActionStatus.NotFound, "Mã ticket không hợp lệ.");
+
+        if (normalizedCode.StartsWith("CA", StringComparison.OrdinalIgnoreCase) ||
+            normalizedCode.StartsWith("AL", StringComparison.OrdinalIgnoreCase))
+            return new TicketActionResult(TicketActionStatus.NotAllowed, "Case CA / Alarm AL không hỗ trợ Pending Customer.");
+
+        var identity = await GetCurrentUserAsync(cancellationToken);
+        if (identity?.UserId != expectedUserId)
+            return new TicketActionResult(TicketActionStatus.AuthenticationRequired,
+                "Tài khoản FTMS đang đăng nhập không khớp với tài khoản giám sát.");
+
+        var code = JsonSerializer.Serialize(normalizedCode);
+        var script = $$"""
+            (async () => {
+              const code = {{code}};
+              const expectedUserId = {{expectedUserId}};
+              const unwrap = (value, depth = 0) => {
+                if (depth > 8 || value == null) return [];
+                if (Array.isArray(value)) return value;
+                if (typeof value === 'string') {
+                  try { return unwrap(JSON.parse(value), depth + 1); } catch { return []; }
+                }
+                if (typeof value !== 'object') return [];
+                for (const key of ['data','Data','rows','Rows','items','Items','result','Result']) {
+                  const rows = unwrap(value[key], depth + 1);
+                  if (rows.length) return rows;
+                }
+                for (const child of Object.values(value)) {
+                  const rows = unwrap(child, depth + 1);
+                  if (rows.some(x => x && typeof x === 'object')) return rows;
+                }
+                return [];
+              };
+              const pick = (row, ...keys) => {
+                for (const key of keys) if (row?.[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
+                return null;
+              };
+              const numberOf = value => {
+                const parsed = Number(value);
+                return value === null || value === undefined || value === '' || !Number.isFinite(parsed) ? null : parsed;
+              };
+              const ticketCodeOf = row => String(pick(row, 'code','Code','requestCode','RequestCode') || '').trim();
+              const assigneeOf = row => numberOf(pick(row, 'staffId','StaffId','agentId','AgentId','assigneeId','AssigneeId','ASSIGNEE_ID'));
+              const claimIdOf = row => pick(row, 'assignId','assignID','assignmentId','AssignmentId','assignmentID',
+                'requestAssignId','RequestAssignId','requestAssignID','strID','intID','requestID','RequestID','requestId',
+                'id','Id','ID','ticketId','TicketId');
+              const statusOf = row => {
+                const numeric = numberOf(pick(row, 'status','Status','statusId','StatusId','STATUS_ID'));
+                if (numeric !== null) return numeric;
+                const name = String(pick(row, 'statusName','StatusName','statusText','StatusText') || '')
+                  .trim().toLocaleLowerCase('vi-VN');
+                return { 'mới': 0, 'tạo mới': 0, 'new': 0, 'phân công': 1, 'assigned': 1,
+                  'đang thực hiện': 2, 'đang xử lý': 2, 'in progress': 2,
+                  'hoàn thành': 3, 'completed': 3, 'tạm ngưng': 4, 'paused': 4,
+                  'đóng': 5, 'đã đóng': 5, 'closed': 5, 'hủy': 7, 'đã hủy': 7,
+                  'cancelled': 7, 'không xử lý': 8 }[name] ?? null;
+              };
+
+              try {
+                if (Number(globalThis.userID) !== expectedUserId || typeof globalThis.Username === 'undefined')
+                  return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên FTMS không đúng tài khoản.' });
+
+                let ticketId = '';
+                let currentOwner = null;
+                let currentStatus = null;
+
+                const cached = globalThis.__ftmsTicketCache?.get(code.toLocaleUpperCase('vi-VN'));
+                if (cached && cached.id) {
+                  ticketId = cached.id;
+                  currentOwner = cached.owner;
+                  currentStatus = cached.status;
+                }
+
+                if (!ticketId) {
+                  const grid = globalThis.jQuery?.('#list-grid').data('kendoGrid');
+                  const gridRow = grid?.dataSource?.data()?.find(x =>
+                    ticketCodeOf(x).toLocaleUpperCase('vi-VN') === code.toLocaleUpperCase('vi-VN'));
+                  if (gridRow) {
+                    ticketId = String(claimIdOf(gridRow) || '').trim();
+                    currentOwner = assigneeOf(gridRow);
+                    currentStatus = statusOf(gridRow);
+                  }
+                }
+
+                if (!ticketId) {
+                  const body = new URLSearchParams({ take: '50', skip: '0', page: '1', pageSize: '50',
+                    search: code, isMyTicket: '', isAkabot: '', strStatus: '', strRegionID: '', linkDeptId: '',
+                    alarmType: '0', isSortByDate: '' });
+                  try {
+                    const response = await fetch('/ihub/request/GetListRequestV12', {
+                      method: 'POST', credentials: 'same-origin',
+                      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest' }, body: body.toString()
+                    });
+                    if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
+                      return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
+                    if (response.ok) {
+                      const rows = unwrap(await response.json());
+                      const row = rows.find(x =>
+                        ticketCodeOf(x).toLocaleUpperCase('vi-VN') === code.toLocaleUpperCase('vi-VN'));
+                      if (row) {
+                        ticketId = String(claimIdOf(row) || '').trim();
+                        currentOwner = assigneeOf(row);
+                        currentStatus = statusOf(row);
+                      }
+                    }
+                  } catch (error) {
+                    return JSON.stringify({ status: 'RetryableFailure', message: String(error) });
+                  }
+                }
+
+                if (!ticketId)
+                  return JSON.stringify({ status: 'NotFound', message: `Không tìm thấy ${code} trên FTMS.` });
+
+                if (currentStatus === 4)
+                  return JSON.stringify({ status: 'AlreadyInTargetState', message: `${code} đã ở trạng thái Tạm ngưng.` });
+
+                if (currentOwner && currentOwner !== expectedUserId)
+                  return JSON.stringify({ status: 'OwnedByAnotherUser', message: `${code} đang do người khác xử lý.` });
+
+                if (currentStatus !== null && currentStatus !== 2)
+                  return JSON.stringify({ status: 'NotAllowed', message: `${code} không ở trạng thái Đang thực hiện.` });
+
+                if (!/^\d{1,20}$/.test(ticketId))
+                  return JSON.stringify({ status: 'NotFound', message: `Không đọc được ID hợp lệ của ${code}.` });
+
+                const readAntiForgeryToken = root => String(
+                  root?.querySelector('input[name="__RequestVerificationToken"], input[name="RequestVerificationToken"]')?.value ||
+                  root?.querySelector('meta[name="__RequestVerificationToken"], meta[name="request-verification-token"], meta[name="csrf-token"]')?.getAttribute('content') || '').trim();
+                let antiForgeryToken = readAntiForgeryToken(document) || globalThis.__ftmsCachedToken || '';
+                if (!antiForgeryToken) {
+                  try {
+                    const homeResponse = await fetch('/ihub/', { credentials: 'same-origin', cache: 'no-store' });
+                    if (/\/id\/login|\/adfs\//i.test(new URL(homeResponse.url).pathname))
+                      return JSON.stringify({ status: 'AuthenticationRequired', message: 'Phiên đăng nhập FTMS đã hết hạn.' });
+                    if (homeResponse.ok) {
+                      const homeHtml = await homeResponse.text();
+                      const homeDocument = new DOMParser().parseFromString(homeHtml, 'text/html');
+                      antiForgeryToken = readAntiForgeryToken(homeDocument);
+                    }
+                  } catch { }
+                }
+                if (antiForgeryToken) globalThis.__ftmsCachedToken = antiForgeryToken;
+
+                const headers = {
+                  'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                  'X-Requested-With': 'XMLHttpRequest'
+                };
+                if (antiForgeryToken) {
+                  headers.Antiforgerykeyheader = antiForgeryToken;
+                  headers.RequestVerificationToken = antiForgeryToken;
+                  headers.__RequestVerificationToken = antiForgeryToken;
+                }
+
+                const changeStatusBody = new URLSearchParams({
+                  deptId: String(globalThis.UserDept || ''),
+                  staffId: String(globalThis.userID),
+                  departmentName: String(globalThis.DepartmentName || ''),
+                  staffName: String(globalThis.Username),
+                  department: String(globalThis.Department || globalThis.DepartmentCode ||
+                    globalThis.DeptCode || globalThis.UserDepartmentCode || ''),
+                  status: '4',
+                  reasonId: '',
+                  statusChangeId: '2',
+                  statusChangeNote: 'Hỗ trợ KH',
+                  id: ticketId,
+                  oldStatus: '2',
+                  code,
+                  type: '10'
+                });
+                if (antiForgeryToken) changeStatusBody.append('__RequestVerificationToken', antiForgeryToken);
+
+                let statusMessage = '';
+                try {
+                  const statusResponse = await fetch('/ihub/Request/ChangeStatus', {
+                    method: 'POST', credentials: 'same-origin', cache: 'no-store',
+                    headers, body: changeStatusBody.toString()
+                  });
+                  if (/\/id\/login|\/adfs\//i.test(new URL(statusResponse.url).pathname))
+                    return JSON.stringify({ status: 'AuthenticationRequired',
+                      message: 'Phiên FTMS hết hạn khi chuyển sang Pending Customer.' });
+                  const statusText = await statusResponse.text();
+                  let statusResult = null;
+                  if (statusText) {
+                    try { statusResult = JSON.parse(statusText); }
+                    catch { statusMessage = statusText.slice(0, 200); }
+                  }
+                  statusMessage = String(statusResult?.message?.value ?? statusResult?.message ?? statusResult?.Message ??
+                    statusResult?.error ?? statusResult?.Error ?? statusMessage);
+                  const statusAccepted = statusResponse.ok && Boolean(statusResult &&
+                    (Number(statusResult.code) === 200 || Number(statusResult.status) === 200 ||
+                      statusResult.result === true || statusResult.result === 1 ||
+                      /^(true|1)$/i.test(String(statusResult.result ?? '')) ||
+                      statusResult.success === true || String(statusResult.status ?? '').toLowerCase() === 'ok' ||
+                      /cập nhật thành công/i.test(statusMessage)));
+                  if (!statusAccepted)
+                    return JSON.stringify({ status: 'RetryableFailure',
+                      message: statusMessage || `FTMS từ chối chuyển ${code} sang Pending Customer.` });
+                } catch (error) {
+                  return JSON.stringify({ status: 'RetryableFailure',
+                    message: `Lỗi mạng khi chuyển sang Pending Customer: ${String(error)}` });
+                }
+
+                return JSON.stringify({ status: 'Success',
+                  message: statusMessage || `Đã chuyển ${code} sang Tạm ngưng / Pending Customer (Hỗ trợ KH).` });
+              } catch (error) {
+                return JSON.stringify({ status: 'RetryableFailure', message: String(error) });
+              }
+            })()
+            """;
+        var json = await ExecuteAsyncJsonStringAsync(script, cancellationToken);
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.String)
+            {
+                using var nested = JsonDocument.Parse(root.GetString() ?? "{}");
+                root = nested.RootElement.Clone();
+            }
+            var statusText = root.TryGetProperty("status", out var statusValue) ? statusValue.GetString() : null;
+            var message = root.TryGetProperty("message", out var messageValue) ? messageValue.GetString() : null;
+            if (Enum.TryParse<TicketActionStatus>(statusText, out var status))
+                return new TicketActionResult(status, message ?? "FTMS không trả về mô tả.");
+        }
+        catch (JsonException) { }
+        return new TicketActionResult(TicketActionStatus.RetryableFailure, "Không đọc được kết quả tạm ngưng từ FTMS.");
+    }
+
     private async Task<IReadOnlyList<TicketSnapshot>> GetTicketsLegacyAsync(CancellationToken cancellationToken)
     {
         const string script = """

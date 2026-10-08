@@ -12,6 +12,8 @@ public interface IFtmsClient
     Task<IReadOnlyList<TicketSnapshot>> GetClosedTicketsAsync(CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<TicketSnapshot>>([]);
     Task<TicketClaimResult> ClaimTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken);
+    Task<TicketActionResult> PauseTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken) =>
+        Task.FromResult(new TicketActionResult(TicketActionStatus.NotAllowed, "Chưa hỗ trợ tạm ngưng"));
     Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken);
     Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken);
     Task BeginLoginRecoveryAsync(CancellationToken cancellationToken);

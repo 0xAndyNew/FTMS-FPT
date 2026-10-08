@@ -159,6 +159,90 @@ public sealed class TelegramCallbackReceiverTests
         Assert.Equal("11", offset);
     }
 
+    [Fact]
+    public async Task SuccessfulPause_CommitsOffsetAndEditsMarkup()
+    {
+        using var directory = new TemporaryDirectory();
+        var sentRequests = new List<HttpRequestMessage>();
+        var handler = new TelegramHandler(PauseUpdates(10, 456, "RQ-1"), req => sentRequests.Add(req));
+        using var http = new HttpClient(handler);
+        var pausedCode = string.Empty;
+        var receiver = new TelegramCallbackReceiver(directory.Path, () => ("123:token", "456"), http,
+            (_, _) => Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok")),
+            (code, _) =>
+            {
+                pausedCode = code;
+                return Task.FromResult(new TicketActionResult(TicketActionStatus.Success, "ok"));
+            });
+
+        await receiver.CheckAsync(CancellationToken.None);
+
+        Assert.Equal("RQ-1", pausedCode);
+        Assert.Contains(sentRequests, r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("editMessageReplyMarkup"));
+        Assert.Contains(sentRequests, r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("answerCallbackQuery"));
+        var offset = await File.ReadAllTextAsync(Path.Combine(directory.Path, "telegram-123.offset"));
+        Assert.Equal("11", offset);
+    }
+
+    [Fact]
+    public async Task RetryablePauseFailure_DoesNotCommitOffset()
+    {
+        using var directory = new TemporaryDirectory();
+        var sentRequests = new List<HttpRequestMessage>();
+        var handler = new TelegramHandler(PauseUpdates(10, 456, "RQ-1"), req => sentRequests.Add(req));
+        using var http = new HttpClient(handler);
+        var receiver = new TelegramCallbackReceiver(directory.Path, () => ("123:token", "456"), http,
+            (_, _) => Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok")),
+            (_, _) => Task.FromResult(new TicketActionResult(TicketActionStatus.RetryableFailure, "lỗi mạng")));
+
+        await receiver.CheckAsync(CancellationToken.None);
+
+        Assert.Contains(sentRequests, r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("answerCallbackQuery"));
+        Assert.False(File.Exists(Path.Combine(directory.Path, "telegram-123.offset")));
+    }
+
+    [Fact]
+    public async Task UnauthorizedChatPause_IgnoredAndCommitsOffset()
+    {
+        using var directory = new TemporaryDirectory();
+        var sentRequests = new List<HttpRequestMessage>();
+        var handler = new TelegramHandler(PauseUpdates(10, 999, "RQ-1"), req => sentRequests.Add(req));
+        using var http = new HttpClient(handler);
+        var pauseCalled = false;
+        var receiver = new TelegramCallbackReceiver(directory.Path, () => ("123:token", "456"), http,
+            (_, _) => Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok")),
+            (_, _) =>
+            {
+                pauseCalled = true;
+                return Task.FromResult(new TicketActionResult(TicketActionStatus.Success, "ok"));
+            });
+
+        await receiver.CheckAsync(CancellationToken.None);
+
+        Assert.False(pauseCalled);
+        Assert.Contains(sentRequests, r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("answerCallbackQuery"));
+        var offset = await File.ReadAllTextAsync(Path.Combine(directory.Path, "telegram-123.offset"));
+        Assert.Equal("11", offset);
+    }
+
+    private static string PauseUpdates(int updateId, int chatId, string code)
+    {
+        var updates = new[]
+        {
+            new
+            {
+                update_id = updateId,
+                callback_query = new
+                {
+                    id = $"callback-{updateId}",
+                    data = $"pause:{code}",
+                    message = new { message_id = updateId, chat = new { id = chatId } }
+                }
+            }
+        };
+        return JsonSerializer.Serialize(new { ok = true, result = updates });
+    }
+
     private static string MessageUpdates(int updateId, int chatId, string text)
     {
         var updates = new[]

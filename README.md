@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.24`
+- **Phiên bản:** `1.0.25`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -76,18 +76,19 @@
 - **Nút tương tác (Inline Keyboard):**
   - `[🔎 Mở ticket]`: Mở liên kết trực tiếp đến trang chỉnh sửa ticket (`/ihub/request/edit/...` hoặc `/ihub/case/edit/...`).
   - `[🙋 Nhận ticket]`: Chỉ xuất hiện trên các ticket ở trạng thái *Tạo mới* hoặc *Phân công*.
+  - `[⏸️ Tạm ngưng]`: Tự động xuất hiện bên cạnh `[🔎 Mở ticket]` trên tất cả thông báo của các ticket dạng RQ đang ở trạng thái *Đang thực hiện* do chính tài khoản kỹ thuật viên đăng nhập xử lý. Khi bấm nút, hệ thống tự động chuyển ticket sang **Tạm ngưng / Pending Customer** với ghi chú **"Hỗ trợ KH"**, đồng thời gỡ bỏ nút trên Telegram và cập nhật tức thì lên HUD Dashboard.
 - **Lệnh tra cứu nhanh qua Telegram Bot (Slash Commands):**
   Kỹ thuật viên có thể nhắn tin trực tiếp với bot bằng các lệnh sau:
   - `/new` hoặc `/chuanhan`: Liệt kê các ticket mới chưa nhận của phòng TOC DC, kèm nút bấm inline `[🙋 Nhận {code}]` để nhận nhanh trực tiếp từ chat.
-  - `/my` hoặc `/cuatoi`: Tra cứu danh sách ticket được phân công cho tài khoản hiện tại kèm trạng thái và liên kết mở nhanh.
+  - `/my` hoặc `/cuatoi`: Tra cứu danh sách ticket được phân công cho tài khoản hiện tại kèm trạng thái và liên kết mở nhanh (kèm nút `[⏸️ Tạm ngưng {code}]` đối với các ticket đang thực hiện).
   - `/sla`: Cảnh báo các ticket đang hoặc sắp vi phạm ngưỡng SLA cam kết.
   - `/help` hoặc `/start`: Hiển thị bảng trợ giúp và danh sách cú pháp lệnh.
-- **Cơ chế nhận ticket từ xa (Remote Claim Ticket):**
-  - Kỹ thuật viên nhấn `[🙋 Nhận ticket]` trên ứng dụng Telegram điện thoại hoặc máy tính.
+- **Cơ chế nhận & tạm ngưng ticket từ xa (Two-Way Remote Actions):**
+  - Kỹ thuật viên nhấn `[🙋 Nhận ticket]` hoặc `[⏸️ Tạm ngưng]` trên ứng dụng Telegram điện thoại hoặc máy tính.
   - Background receiver (`TelegramCallbackReceiver`) lắng nghe webhook/getUpdates từ Telegram, xác thực chat ID hợp lệ.
-  - Gọi ngầm API FTMS `TakeAndAssignmentV12` để nhận ticket về tài khoản FTMS của kỹ thuật viên.
-  - Sau khi nhận RQ thành công, tự gọi `ChangeStatus` để chuyển ticket sang **Tạm ngưng / Pending Customer** với ghi chú **“Hỗ trợ KH”**.
-  - Chỉ xác nhận và bỏ nút nhận trên Telegram sau khi toàn bộ luồng hoàn tất; lỗi đổi trạng thái được giữ lại để thử lại an toàn.
+  - Nhận ticket: Gọi ngầm API FTMS `TakeAndAssignmentV12` để nhận ticket về tài khoản FTMS của kỹ thuật viên. Sau khi nhận RQ thành công, tự gọi `ChangeStatus` để chuyển ticket sang **Tạm ngưng / Pending Customer** với ghi chú **“Hỗ trợ KH”**.
+  - Tạm ngưng ticket: Gọi ngầm API FTMS `ChangeStatus` chuyển ticket sang **Tạm ngưng / Pending Customer** (ghi chú: **“Hỗ trợ KH”**), sau đó kích hoạt cập nhật trạng thái tức thì lên ứng dụng.
+  - Chỉ xác nhận và gỡ bỏ nút bấm trên Telegram sau khi toàn bộ quy trình hoàn tất thành công; lỗi mạng hoặc hết hạn phiên được giữ lại để thử lại an toàn.
 
 ### 2.6. Hỗ trợ Proxy doanh nghiệp cho Telegram
 - Cho phép cấu hình HTTP Proxy riêng cho Telegram (`http://host:port`) mà không làm ảnh hưởng đến đường truyền nội bộ của FTMS trong WebView2.

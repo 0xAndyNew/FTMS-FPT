@@ -11,12 +11,20 @@ namespace FTMS.Infrastructure;
 public sealed class TelegramOutboxSender(
     string databasePath,
     Func<(string Token, string ChatId)> settings,
-    HttpClient http) : INotificationSender
+    HttpClient http,
+    Func<long?>? getCurrentUserId = null) : INotificationSender
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
     private readonly object _wakeLock = new();
     private TaskCompletionSource<bool> _wakeTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _running;
+
+    public TelegramOutboxSender(
+        string databasePath,
+        Func<(string Token, string ChatId)> settings,
+        HttpClient http) : this(databasePath, settings, http, getCurrentUserId: null)
+    {
+    }
 
     public void Signal()
     {
@@ -140,14 +148,18 @@ public sealed class TelegramOutboxSender(
             catch (JsonException) { }
         }
 
+        var currentUserId = getCurrentUserId?.Invoke();
         var canReceive = CanReceiveTicket(eventItem, decodedMessage);
+        var canPause = !canReceive && CanPauseTicket(eventItem, decodedMessage, currentUserId);
         var route = code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) ||
                     code.StartsWith("AL", StringComparison.OrdinalIgnoreCase)
             ? "case" : "request";
         var openUrl = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(code)}";
         object[][] buttons = canReceive
             ? [[new { text = "🔎 Mở ticket", url = openUrl }, new { text = "🙋 Nhận ticket", callback_data = $"receive:{code}" }]]
-            : [[new { text = "🔎 Mở ticket", url = openUrl }]];
+            : canPause
+                ? [[new { text = "🔎 Mở ticket", url = openUrl }, new { text = "⏸️ Tạm ngưng", callback_data = $"pause:{code}" }]]
+                : [[new { text = "🔎 Mở ticket", url = openUrl }]];
 
         var parts = SplitMessageIfExceedsLimit(item.Message, 4000);
         for (var i = 0; i < parts.Count; i++)
@@ -160,7 +172,7 @@ public sealed class TelegramOutboxSender(
                 $"https://api.telegram.org/bot{telegram.Token}/sendMessage", payload, ct);
             var responseJson = await EnsureTelegramSuccessAsync(response, ct);
 
-            if (isFirst && canReceive && !string.IsNullOrWhiteSpace(code))
+            if (isFirst && (canReceive || canPause) && !string.IsNullOrWhiteSpace(code))
             {
                 try
                 {
@@ -176,7 +188,7 @@ public sealed class TelegramOutboxSender(
             }
         }
 
-        if (!canReceive && !string.IsNullOrWhiteSpace(code))
+        if (!canReceive && !canPause && !string.IsNullOrWhiteSpace(code))
             await RemoveAllClaimButtonsForTicketAsync(
                 connection, telegram.Token, telegram.ChatId, code, openUrl, ct);
     }
@@ -249,6 +261,31 @@ public sealed class TelegramOutboxSender(
         return decodedMessage.Contains("Ticket mới", StringComparison.OrdinalIgnoreCase) ||
             decodedMessage.Contains("Nhắc ticket chưa được nhận", StringComparison.OrdinalIgnoreCase) ||
             Regex.IsMatch(decodedMessage, @"Trạng thái:</b>\s*(?:[^\r\n]*➔\s*)?(?:Tạo mới|Phân công)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase);
+    }
+
+    public static bool CanPauseTicket(TicketEvent? evt, string decodedMessage, long? currentUserId)
+    {
+        if (currentUserId is null or <= 0)
+            return false;
+
+        if (evt is not null)
+        {
+            var isRequest = !evt.Snapshot.Code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) &&
+                            !evt.Snapshot.Code.StartsWith("AL", StringComparison.OrdinalIgnoreCase);
+            var isInProgress = evt.CurrentStatus == TicketStatus.InProgress;
+            var isAssignedToMe = evt.Snapshot.AssigneeId == currentUserId;
+            return isRequest && isInProgress && isAssignedToMe;
+        }
+
+        var codeMatch = Regex.Match(decodedMessage, @"Mã (?:RQ|ticket|request):(?:</b>)?\s*(?:<code>)?([^\s<]+)", RegexOptions.IgnoreCase);
+        if (codeMatch.Success)
+        {
+            var code = codeMatch.Groups[1].Value;
+            if (code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) || code.StartsWith("AL", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return false;
     }
 
     private static async Task SaveClaimMessageAsync(SqliteConnection connection, string code, string chatId, long messageId, CancellationToken ct)

@@ -141,3 +141,20 @@ public sealed record DashboardSummary(int Total, int New, int Assigned, int InPr
 }
 
 public sealed record TelegramCommandResponse(string Text, object[][]? InlineKeyboard = null);
+
+public enum TicketActionStatus
+{
+    Success,
+    AlreadyInTargetState,
+    OwnedByAnotherUser,
+    NotFound,
+    NotAllowed,
+    AuthenticationRequired,
+    RetryableFailure
+}
+
+public sealed record TicketActionResult(TicketActionStatus Status, string Message)
+{
+    public bool IsSuccess => Status is TicketActionStatus.Success or TicketActionStatus.AlreadyInTargetState;
+    public bool IsRetryable => Status is TicketActionStatus.AuthenticationRequired or TicketActionStatus.RetryableFailure;
+}

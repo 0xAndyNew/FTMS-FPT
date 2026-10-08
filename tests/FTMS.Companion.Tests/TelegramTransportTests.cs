@@ -246,4 +246,130 @@ public sealed class TelegramTransportTests
             try { if (File.Exists(dbPath)) File.Delete(dbPath); } catch { }
         }
     }
+
+    [Fact]
+    public void CanPauseTicket_ReturnsTrue_WhenInProgressAndAssignedToCurrentUser()
+    {
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "RQ20261002-0005",
+            Status = FTMS.Domain.TicketStatus.InProgress,
+            AssigneeId = 100,
+            AssigneeName = "Nguyen Van A"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key5",
+            TicketCode = "RQ20261002-0005",
+            EventType = FTMS.Domain.TicketEventType.StatusChanged,
+            CurrentStatus = FTMS.Domain.TicketStatus.InProgress,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "InProgress",
+            Snapshot = snapshot
+        };
+
+        var canPause = TelegramOutboxSender.CanPauseTicket(evt, "Mã RQ: RQ20261002-0005", 100);
+        Assert.True(canPause);
+    }
+
+    [Fact]
+    public void CanPauseTicket_ReturnsFalse_WhenCaseOrAlarm()
+    {
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "CA20261002-0005",
+            Status = FTMS.Domain.TicketStatus.InProgress,
+            AssigneeId = 100,
+            AssigneeName = "Nguyen Van A"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key-ca",
+            TicketCode = "CA20261002-0005",
+            EventType = FTMS.Domain.TicketEventType.StatusChanged,
+            CurrentStatus = FTMS.Domain.TicketStatus.InProgress,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "InProgress",
+            Snapshot = snapshot
+        };
+
+        var canPause = TelegramOutboxSender.CanPauseTicket(evt, "Mã Case: CA20261002-0005", 100);
+        Assert.False(canPause);
+    }
+
+    [Fact]
+    public void CanPauseTicket_ReturnsFalse_WhenAssignedToAnotherUser()
+    {
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "RQ20261002-0005",
+            Status = FTMS.Domain.TicketStatus.InProgress,
+            AssigneeId = 200,
+            AssigneeName = "Tran Van B"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key-other",
+            TicketCode = "RQ20261002-0005",
+            EventType = FTMS.Domain.TicketEventType.StatusChanged,
+            CurrentStatus = FTMS.Domain.TicketStatus.InProgress,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "InProgress",
+            Snapshot = snapshot
+        };
+
+        var canPause = TelegramOutboxSender.CanPauseTicket(evt, "Mã RQ: RQ20261002-0005", 100);
+        Assert.False(canPause);
+    }
+
+    [Fact]
+    public void CanPauseTicket_ReturnsFalse_WhenNotAlreadyInProgress()
+    {
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "RQ20261002-0005",
+            Status = FTMS.Domain.TicketStatus.Paused,
+            AssigneeId = 100,
+            AssigneeName = "Nguyen Van A"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key-paused",
+            TicketCode = "RQ20261002-0005",
+            EventType = FTMS.Domain.TicketEventType.StatusChanged,
+            CurrentStatus = FTMS.Domain.TicketStatus.Paused,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "Paused",
+            Snapshot = snapshot
+        };
+
+        var canPause = TelegramOutboxSender.CanPauseTicket(evt, "Mã RQ: RQ20261002-0005", 100);
+        Assert.False(canPause);
+    }
+
+    [Fact]
+    public void CanPauseTicket_ReturnsFalse_WhenCurrentUserIdInvalidOrNull()
+    {
+        var snapshot = new FTMS.Domain.TicketSnapshot
+        {
+            Code = "RQ20261002-0005",
+            Status = FTMS.Domain.TicketStatus.InProgress,
+            AssigneeId = 100,
+            AssigneeName = "Nguyen Van A"
+        };
+        var evt = new FTMS.Domain.TicketEvent
+        {
+            EventKey = "key-valid",
+            TicketCode = "RQ20261002-0005",
+            EventType = FTMS.Domain.TicketEventType.StatusChanged,
+            CurrentStatus = FTMS.Domain.TicketStatus.InProgress,
+            DetectedAt = DateTimeOffset.Now,
+            Reason = "InProgress",
+            Snapshot = snapshot
+        };
+
+        Assert.False(TelegramOutboxSender.CanPauseTicket(evt, "Mã RQ: RQ20261002-0005", null));
+        Assert.False(TelegramOutboxSender.CanPauseTicket(evt, "Mã RQ: RQ20261002-0005", 0));
+        Assert.False(TelegramOutboxSender.CanPauseTicket(evt, "Mã RQ: RQ20261002-0005", -1));
+    }
 }
