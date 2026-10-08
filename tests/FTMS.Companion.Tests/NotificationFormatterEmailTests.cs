@@ -738,6 +738,142 @@ public sealed class NotificationFormatterEmailTests
         Assert.DoesNotContain("EMAIL MỚI CỦA TICKET", message);
     }
 
+    [Fact]
+    public void NotificationFormatter_EmailReceived_IncludesBothEmailTimeAndChangeTime()
+    {
+        var emailSentAt = new DateTimeOffset(2026, 10, 8, 9, 14, 30, TimeSpan.FromHours(7));
+        var changeAt = new DateTimeOffset(2026, 10, 8, 9, 15, 0, TimeSpan.FromHours(7));
+        var email = Email("201", emailSentAt, "Khách hàng gửi phản hồi mới");
+        var snapshot = Snapshot("IN202610080055", TicketStatus.InProgress, email, changeAt);
+        var evt = new TicketEvent
+        {
+            EventKey = "email-time-test-key",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.EmailReceived,
+            CurrentStatus = TicketStatus.InProgress,
+            DetectedAt = changeAt.AddSeconds(5),
+            ChangedAt = changeAt,
+            Reason = "FTMS có email mới",
+            LatestEmail = email,
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+        Assert.Contains("Trạng thái:</b> Đang thực hiện", message);
+        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:15 (UTC+07:00)", message);
+        Assert.Contains("Time: 08/10/2026 09:14:30 (UTC+07:00)", message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_StatusChanged_FromPausedToInProgress_WithEmail_IncludesBothTimes()
+    {
+        var emailSentAt = new DateTimeOffset(2026, 10, 8, 9, 14, 0, TimeSpan.FromHours(7));
+        var changeAt = new DateTimeOffset(2026, 10, 8, 9, 15, 0, TimeSpan.FromHours(7));
+        var email = Email("202", emailSentAt, "Khách hàng phản hồi và ticket tự chuyển InProgress");
+        var snapshot = Snapshot("RQ202610080060", TicketStatus.InProgress, email, changeAt);
+        var evt = new TicketEvent
+        {
+            EventKey = "resume-test-key",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.StatusChanged,
+            PreviousStatus = TicketStatus.Paused,
+            CurrentStatus = TicketStatus.InProgress,
+            DetectedAt = changeAt.AddSeconds(3),
+            ChangedAt = changeAt,
+            Reason = "FTMS có email mới",
+            LatestEmail = email,
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+        Assert.Contains("Trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", message);
+        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:15 (UTC+07:00)", message);
+        Assert.Contains("Time: 08/10/2026 09:14:00 (UTC+07:00)", message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_AssignmentChanged_IncludesChangeTime()
+    {
+        var changeAt = new DateTimeOffset(2026, 10, 8, 9, 20, 0, TimeSpan.FromHours(7));
+        var snapshot = Snapshot("RQ202610080061", TicketStatus.Assigned, null, changeAt) with
+        {
+            AssigneeName = "DuyPK21"
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "assign-test-key",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.AssignmentChanged,
+            PreviousStatus = TicketStatus.Assigned,
+            CurrentStatus = TicketStatus.Assigned,
+            PreviousAssigneeName = "Chưa nhận",
+            DetectedAt = changeAt.AddSeconds(2),
+            ChangedAt = changeAt,
+            Reason = "Người xử lý hoặc phòng ban đã thay đổi",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET ĐÃ CÓ NGƯỜI NHẬN", message);
+        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:20 (UTC+07:00)", message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_Terminal_ClosedTicket_IncludesChangeTime()
+    {
+        var closedAt = new DateTimeOffset(2026, 10, 8, 9, 30, 0, TimeSpan.FromHours(7));
+        var snapshot = Snapshot("RQ202610080062", TicketStatus.Closed, null, closedAt);
+        var evt = new TicketEvent
+        {
+            EventKey = "closed-test-key",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.Terminal,
+            PreviousStatus = TicketStatus.InProgress,
+            CurrentStatus = TicketStatus.Closed,
+            DetectedAt = closedAt.AddSeconds(5),
+            ChangedAt = closedAt,
+            ChangedBy = "HieuDX2",
+            Reason = "Đã hỗ trợ xong",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET ĐÃ ĐÓNG", message);
+        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:30 (UTC+07:00)", message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_CreatedTicket_DoesNotIncludeChangeTime()
+    {
+        var createdAt = new DateTimeOffset(2026, 10, 8, 9, 0, 0, TimeSpan.FromHours(7));
+        var snapshot = Snapshot("RQ202610080063", TicketStatus.New, null, createdAt) with
+        {
+            CreatedAt = createdAt
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "created-test-key-2",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.Created,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = createdAt.AddSeconds(20),
+            Reason = "Phát hiện ticket mới",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET MỚI", message);
+        Assert.Contains("Thời gian tạo:</b> 08/10/2026 09:00 (UTC+07:00)", message);
+        Assert.DoesNotContain("Thời gian thay đổi", message);
+    }
+
     private static LatestEmail Email(string id, DateTimeOffset sentAt, string body) =>
         new(id, sentAt, "sender@fpt.com", "Tiêu đề kiểm thử", body);
 

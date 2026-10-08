@@ -90,8 +90,15 @@ public sealed class TicketChangeDetector
             if (enriched is null) continue;
 
             var enrichedSnapshot = evt.Snapshot with { LatestEmail = enriched };
+            var reason = evt.EventType == TicketEventType.StatusChanged &&
+                evt.PreviousStatus == TicketStatus.Paused &&
+                evt.CurrentStatus == TicketStatus.InProgress &&
+                !enriched.IsExcluded()
+                    ? "FTMS có email mới"
+                    : evt.Reason;
             result[i] = evt with
             {
+                Reason = reason,
                 LatestEmail = enriched,
                 Snapshot = enrichedSnapshot
             };
@@ -220,7 +227,9 @@ public sealed class TicketChangeDetector
                         var enriched = snapshot with { LatestEmail = email };
                         events.Add(Create(enriched, TicketEventType.EmailReceived, old.Status,
                             "FTMS có email mới", email,
-                            discriminator: email.Id ?? email.SentAt?.ToString("O") ?? string.Empty));
+                            discriminator: email.Id ?? email.SentAt?.ToString("O") ?? string.Empty,
+                            changedBy: snapshot.UpdatedBy,
+                            changedAt: snapshot.UpdatedAt ?? email.SentAt ?? DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7))));
                     }
                 }
             }

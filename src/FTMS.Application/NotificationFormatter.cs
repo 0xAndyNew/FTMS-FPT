@@ -11,6 +11,9 @@ public static partial class NotificationFormatter
     public static string Format(TicketEvent item, string ihubBaseUrl)
     {
         var ticket = item.Snapshot;
+        var email = item.LatestEmail is { } eventEmail && !eventEmail.IsExcluded()
+            ? eventEmail : ticket.LatestEmail is { } snapshotEmail && !snapshotEmail.IsExcluded()
+                ? snapshotEmail : null;
         var text = new StringBuilder();
         text.AppendLine(item.EventType switch
         {
@@ -28,7 +31,8 @@ public static partial class NotificationFormatter
                 _ => "✅ <b>🟢 TICKET KẾT THÚC</b>"
             },
             TicketEventType.StatusChanged when ticket.Status == TicketStatus.InProgress &&
-                item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
+                (item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) ||
+                 (item.PreviousStatus == TicketStatus.Paused && email is not null)) => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
             TicketEventType.StatusChanged => "🔄 <b>🔵 THAY ĐỔI TRẠNG THÁI</b>",
             TicketEventType.AssignmentChanged => AssignmentTitle(item),
             _ => "📣 <b>🔵 CẬP NHẬT TICKET</b>"
@@ -68,8 +72,13 @@ public static partial class NotificationFormatter
         else if (item.EventType != TicketEventType.Created &&
                  (item.EventType != TicketEventType.Terminal || ticket.Status != TicketStatus.Closed))
             text.AppendLine($"🕰 <b>Thời gian từ lúc tạo ticket:</b> {ageMinutes} phút");
-        var changeTime = item.ChangedAt ?? (ticket.Status == TicketStatus.Closed ? ticket.UpdatedAt : null);
-        if (isStatusTransition && changeTime is not null)
+        var shouldShowChangeTime = item.EventType is not TicketEventType.Created &&
+            item.EventType is not TicketEventType.UnassignedReminder &&
+            item.EventType is not TicketEventType.ResponseReminder &&
+            item.EventType is not TicketEventType.SlaThresholdReached;
+        DateTimeOffset? changeTime = item.ChangedAt ?? ticket.UpdatedAt ??
+            (item.EventType == TicketEventType.EmailReceived ? email?.SentAt : null) ?? item.DetectedAt;
+        if (shouldShowChangeTime && changeTime is not null)
             text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value, includeSeconds: false)}");
         if (item.EventType == TicketEventType.AssignmentChanged)
         {
@@ -86,9 +95,6 @@ public static partial class NotificationFormatter
                     ? $"⛔ <b>Số phút vi phạm:</b> {Math.Abs(ticket.SlaDeviationMinutes.Value)} phút"
                     : $"⏳ <b>Thời gian còn lại:</b> {ticket.SlaDeviationMinutes.Value} phút");
         }
-        var email = item.LatestEmail is { } eventEmail && !eventEmail.IsExcluded()
-            ? eventEmail : ticket.LatestEmail is { } snapshotEmail && !snapshotEmail.IsExcluded()
-                ? snapshotEmail : null;
         var originalTicketTitle = string.IsNullOrWhiteSpace(ticket.Title) ? email?.Subject : ticket.Title;
         var emailBody = CleanEmail(email?.Body);
         var shouldRenderBlockquote = email is not null &&
@@ -188,8 +194,12 @@ public static partial class NotificationFormatter
 
     private static string AssignmentTitle(TicketEvent item)
     {
-        var hadAssignee = !string.IsNullOrWhiteSpace(item.PreviousAssigneeName) && item.PreviousAssigneeName.Trim() != "---";
-        var hasAssignee = !string.IsNullOrWhiteSpace(item.Snapshot.AssigneeName) && item.Snapshot.AssigneeName.Trim() != "---";
+        var hadAssignee = !string.IsNullOrWhiteSpace(item.PreviousAssigneeName) &&
+            item.PreviousAssigneeName.Trim() != "---" &&
+            !item.PreviousAssigneeName.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
+        var hasAssignee = !string.IsNullOrWhiteSpace(item.Snapshot.AssigneeName) &&
+            item.Snapshot.AssigneeName.Trim() != "---" &&
+            !item.Snapshot.AssigneeName.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
         if (!hadAssignee && hasAssignee) return "🙋 <b>🟢 TICKET ĐÃ CÓ NGƯỜI NHẬN</b>";
         if (!string.Equals(item.PreviousAssigneeName, item.Snapshot.AssigneeName, StringComparison.OrdinalIgnoreCase))
             return "👥 <b>🔵 TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ</b>";
