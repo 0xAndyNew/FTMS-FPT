@@ -46,6 +46,14 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         return false;
     }
 
+    public IReadOnlyList<TicketSnapshot> GetActiveSnapshots()
+    {
+        lock (_active)
+        {
+            return _active.Values.ToList();
+        }
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         await store.InitializeAsync(cancellationToken);

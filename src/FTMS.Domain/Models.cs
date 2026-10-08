@@ -139,3 +139,5 @@ public sealed record DashboardSummary(int Total, int New, int Assigned, int InPr
     public int PersonalWorkloadTotal => PersonalAssigned + PersonalInProgress + PersonalPaused;
     public bool HasCurrentUser => CurrentUser is not null;
 }
+
+public sealed record TelegramCommandResponse(string Text, object[][]? InlineKeyboard = null);

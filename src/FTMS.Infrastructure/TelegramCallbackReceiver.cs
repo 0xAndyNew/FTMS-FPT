@@ -11,9 +11,20 @@ public sealed class TelegramCallbackReceiver(
     Func<(string Token, string ChatId)> settings,
     HttpClient http,
     Func<string, CancellationToken, Task<TicketClaimResult>> claimTicket,
+    Func<string, CancellationToken, Task<TelegramCommandResponse?>>? commandHandler = null,
     Action<string>? reportStatus = null)
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    public TelegramCallbackReceiver(
+        string stateDirectory,
+        Func<(string Token, string ChatId)> settings,
+        HttpClient http,
+        Func<string, CancellationToken, Task<TicketClaimResult>> claimTicket,
+        Action<string>? reportStatus)
+        : this(stateDirectory, settings, http, claimTicket, commandHandler: null, reportStatus)
+    {
+    }
 
     public async Task CheckAsync(CancellationToken cancellationToken, int timeoutSeconds = 0)
     {
@@ -37,7 +48,7 @@ public sealed class TelegramCallbackReceiver(
         var offset = await ReadOffsetAsync(offsetPath, cancellationToken);
         var timeout = Math.Max(0, timeoutSeconds);
         using var response = await http.GetAsync(
-            $"https://api.telegram.org/bot{telegram.Token}/getUpdates?offset={offset}&timeout={timeout}&allowed_updates=%5B%22callback_query%22%5D",
+            $"https://api.telegram.org/bot{telegram.Token}/getUpdates?offset={offset}&timeout={timeout}&allowed_updates=%5B%22callback_query%22%2C%22message%22%5D",
             cancellationToken);
         var root = await ReadTelegramResponseAsync(response, cancellationToken);
         if (!root.TryGetProperty("result", out var results) || results.ValueKind != JsonValueKind.Array) return;
@@ -47,82 +58,134 @@ public sealed class TelegramCallbackReceiver(
             .OrderBy(x => x.GetProperty("update_id").GetInt64()))
         {
             var updateId = update.GetProperty("update_id").GetInt64();
-            if (!update.TryGetProperty("callback_query", out var callback))
+            if (update.TryGetProperty("callback_query", out var callback))
             {
-                await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
-                continue;
-            }
-
-            var callbackId = callback.TryGetProperty("id", out var callbackIdElement)
-                ? callbackIdElement.GetString()
-                : null;
-            var callbackChatId = callback.TryGetProperty("message", out var callbackMessage) &&
-                callbackMessage.TryGetProperty("chat", out var callbackChat) &&
-                callbackChat.TryGetProperty("id", out var callbackChatIdElement)
-                ? callbackChatIdElement.ToString()
-                : string.Empty;
-            if (!string.Equals(callbackChatId, telegram.ChatId.Trim(), StringComparison.Ordinal))
-            {
-                await AnswerBestEffortAsync(telegram.Token, callbackId,
-                    "Chat này không được phép thao tác ticket.", true, cancellationToken);
-                await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
-                continue;
-            }
-
-            var data = callback.TryGetProperty("data", out var dataElement) ? dataElement.GetString() : null;
-            if (data?.StartsWith("receive:", StringComparison.Ordinal) != true)
-            {
-                await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
-                continue;
-            }
-
-            var code = data["receive:".Length..].Trim();
-            if (string.IsNullOrWhiteSpace(code))
-            {
-                await AnswerBestEffortAsync(telegram.Token, callbackId,
-                    "Mã ticket không hợp lệ.", true, cancellationToken);
-                await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
-                continue;
-            }
-            var result = await claimTicket(code, cancellationToken);
-            if (result.IsRetryable)
-            {
-                await AnswerBestEffortAsync(telegram.Token, callbackId,
-                    $"Chưa thể nhận {code}: {result.Message}", true, cancellationToken);
-                reportStatus?.Invoke(TelegramErrorSanitizer.Sanitize(
-                    $"Telegram sẽ thử lại {code}: {result.Message}", telegram.Token));
-                break;
-            }
-
-            var editMarkupTask = Task.CompletedTask;
-            if (callback.TryGetProperty("message", out var sourceMessage) &&
-                sourceMessage.TryGetProperty("message_id", out var messageIdElement))
-            {
-                var route = code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) ||
-                    code.StartsWith("AL", StringComparison.OrdinalIgnoreCase) ? "case" : "request";
-                editMarkupTask = PostBestEffortAsync(telegram.Token, "editMessageReplyMarkup", new
+                var callbackId = callback.TryGetProperty("id", out var callbackIdElement)
+                    ? callbackIdElement.GetString()
+                    : null;
+                var callbackChatId = callback.TryGetProperty("message", out var callbackMessage) &&
+                    callbackMessage.TryGetProperty("chat", out var callbackChat) &&
+                    callbackChat.TryGetProperty("id", out var callbackChatIdElement)
+                    ? callbackChatIdElement.ToString()
+                    : string.Empty;
+                if (!string.Equals(callbackChatId, telegram.ChatId.Trim(), StringComparison.Ordinal))
                 {
-                    chat_id = callbackChatId,
-                    message_id = messageIdElement.GetInt64(),
-                    reply_markup = new
+                    await AnswerBestEffortAsync(telegram.Token, callbackId,
+                        "Chat này không được phép thao tác ticket.", true, cancellationToken);
+                    await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+                    continue;
+                }
+
+                var data = callback.TryGetProperty("data", out var dataElement) ? dataElement.GetString() : null;
+                if (data?.StartsWith("receive:", StringComparison.Ordinal) != true)
+                {
+                    await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+                    continue;
+                }
+
+                var code = data["receive:".Length..].Trim();
+                if (string.IsNullOrWhiteSpace(code))
+                {
+                    await AnswerBestEffortAsync(telegram.Token, callbackId,
+                        "Mã ticket không hợp lệ.", true, cancellationToken);
+                    await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+                    continue;
+                }
+                var result = await claimTicket(code, cancellationToken);
+                if (result.IsRetryable)
+                {
+                    await AnswerBestEffortAsync(telegram.Token, callbackId,
+                        $"Chưa thể nhận {code}: {result.Message}", true, cancellationToken);
+                    reportStatus?.Invoke(TelegramErrorSanitizer.Sanitize(
+                        $"Telegram sẽ thử lại {code}: {result.Message}", telegram.Token));
+                    break;
+                }
+
+                var editMarkupTask = Task.CompletedTask;
+                if (callback.TryGetProperty("message", out var sourceMessage) &&
+                    sourceMessage.TryGetProperty("message_id", out var messageIdElement))
+                {
+                    var route = code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) ||
+                        code.StartsWith("AL", StringComparison.OrdinalIgnoreCase) ? "case" : "request";
+                    editMarkupTask = PostBestEffortAsync(telegram.Token, "editMessageReplyMarkup", new
                     {
-                        inline_keyboard = new object[][]
+                        chat_id = callbackChatId,
+                        message_id = messageIdElement.GetInt64(),
+                        reply_markup = new
                         {
-                            [new { text = "🔎 Mở ticket", url = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(code)}" }]
+                            inline_keyboard = new object[][]
+                            {
+                                [new { text = "🔎 Mở ticket", url = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(code)}" }]
+                            }
+                        }
+                    }, cancellationToken);
+                }
+
+                var successText = result.Status switch
+                {
+                    TicketClaimStatus.Claimed => $"Đã nhận {code} trên FTMS",
+                    TicketClaimStatus.AlreadyOwnedByCurrentUser => $"{code} đã thuộc tài khoản FTMS hiện tại",
+                    _ => result.Message
+                };
+                var answerTask = AnswerBestEffortAsync(telegram.Token, callbackId, successText, !result.IsSuccess, cancellationToken);
+                await Task.WhenAll(editMarkupTask, answerTask);
+                await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+            }
+            else if (update.TryGetProperty("message", out var messageElement))
+            {
+                var messageChatId = messageElement.TryGetProperty("chat", out var msgChat) &&
+                    msgChat.TryGetProperty("id", out var msgChatIdElement)
+                    ? msgChatIdElement.ToString()
+                    : string.Empty;
+
+                if (!string.Equals(messageChatId, telegram.ChatId.Trim(), StringComparison.Ordinal))
+                {
+                    await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+                    continue;
+                }
+
+                var text = messageElement.TryGetProperty("text", out var textElement) ? textElement.GetString() : null;
+                if (!string.IsNullOrWhiteSpace(text) && commandHandler is not null)
+                {
+                    try
+                    {
+                        var responseContent = await commandHandler(text.Trim(), cancellationToken);
+                        if (responseContent is not null && !string.IsNullOrWhiteSpace(responseContent.Text))
+                        {
+                            object payload = responseContent.InlineKeyboard is not null && responseContent.InlineKeyboard.Length > 0
+                                ? new
+                                {
+                                    chat_id = telegram.ChatId.Trim(),
+                                    text = responseContent.Text,
+                                    parse_mode = "HTML",
+                                    disable_web_page_preview = true,
+                                    reply_markup = new { inline_keyboard = responseContent.InlineKeyboard }
+                                }
+                                : new
+                                {
+                                    chat_id = telegram.ChatId.Trim(),
+                                    text = responseContent.Text,
+                                    parse_mode = "HTML",
+                                    disable_web_page_preview = true
+                                };
+
+                            await PostBestEffortAsync(telegram.Token, "sendMessage", payload, cancellationToken);
                         }
                     }
-                }, cancellationToken);
-            }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                    catch (Exception ex)
+                    {
+                        reportStatus?.Invoke(TelegramErrorSanitizer.Sanitize(
+                            $"Lỗi xử lý lệnh Telegram: {ex.Message}", telegram.Token));
+                    }
+                }
 
-            var successText = result.Status switch
+                await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+            }
+            else
             {
-                TicketClaimStatus.Claimed => $"Đã nhận {code} trên FTMS",
-                TicketClaimStatus.AlreadyOwnedByCurrentUser => $"{code} đã thuộc tài khoản FTMS hiện tại",
-                _ => result.Message
-            };
-            var answerTask = AnswerBestEffortAsync(telegram.Token, callbackId, successText, !result.IsSuccess, cancellationToken);
-            await Task.WhenAll(editMarkupTask, answerTask);
-            await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+                await WriteOffsetAsync(offsetPath, updateId + 1, cancellationToken);
+            }
         }
     }
 

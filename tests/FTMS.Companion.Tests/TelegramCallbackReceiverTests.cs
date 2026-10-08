@@ -93,6 +93,90 @@ public sealed class TelegramCallbackReceiverTests
         Assert.Contains("timeout=25", requestedUri.Query);
     }
 
+    [Fact]
+    public async Task MessageCommand_AuthorizedChat_InvokesCommandHandlerAndCommitsOffset()
+    {
+        using var directory = new TemporaryDirectory();
+        var sentRequests = new List<HttpRequestMessage>();
+        var handler = new TelegramHandler(MessageUpdates(10, 456, "/new"), req => sentRequests.Add(req));
+        using var http = new HttpClient(handler);
+        var handledCommand = "";
+        var receiver = new TelegramCallbackReceiver(directory.Path, () => ("123:token", "456"), http,
+            (_, _) => Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok")),
+            (cmd, _) =>
+            {
+                handledCommand = cmd;
+                return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse("DANH SACH TICKET"));
+            });
+
+        await receiver.CheckAsync(CancellationToken.None);
+
+        Assert.Equal("/new", handledCommand);
+        Assert.Contains(sentRequests, r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("sendMessage"));
+        var offset = await File.ReadAllTextAsync(Path.Combine(directory.Path, "telegram-123.offset"));
+        Assert.Equal("11", offset);
+    }
+
+    [Fact]
+    public async Task MessageCommand_UnauthorizedChat_IgnoredAndCommitsOffset()
+    {
+        using var directory = new TemporaryDirectory();
+        var sentRequests = new List<HttpRequestMessage>();
+        var handler = new TelegramHandler(MessageUpdates(10, 999, "/new"), req => sentRequests.Add(req));
+        using var http = new HttpClient(handler);
+        var commandInvoked = false;
+        var receiver = new TelegramCallbackReceiver(directory.Path, () => ("123:token", "456"), http,
+            (_, _) => Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok")),
+            (cmd, _) =>
+            {
+                commandInvoked = true;
+                return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse("OK"));
+            });
+
+        await receiver.CheckAsync(CancellationToken.None);
+
+        Assert.False(commandInvoked);
+        Assert.DoesNotContain(sentRequests, r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("sendMessage"));
+        var offset = await File.ReadAllTextAsync(Path.Combine(directory.Path, "telegram-123.offset"));
+        Assert.Equal("11", offset);
+    }
+
+    [Fact]
+    public async Task MessageCommand_NullResponse_DoesNotSendAndCommitsOffset()
+    {
+        using var directory = new TemporaryDirectory();
+        var sentRequests = new List<HttpRequestMessage>();
+        var handler = new TelegramHandler(MessageUpdates(10, 456, "tin nhan thuong"), req => sentRequests.Add(req));
+        using var http = new HttpClient(handler);
+        var receiver = new TelegramCallbackReceiver(directory.Path, () => ("123:token", "456"), http,
+            (_, _) => Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok")),
+            (_, _) => Task.FromResult<TelegramCommandResponse?>(null));
+
+        await receiver.CheckAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(sentRequests, r => r.Method == HttpMethod.Post && r.RequestUri!.AbsolutePath.EndsWith("sendMessage"));
+        var offset = await File.ReadAllTextAsync(Path.Combine(directory.Path, "telegram-123.offset"));
+        Assert.Equal("11", offset);
+    }
+
+    private static string MessageUpdates(int updateId, int chatId, string text)
+    {
+        var updates = new[]
+        {
+            new
+            {
+                update_id = updateId,
+                message = new
+                {
+                    message_id = 999,
+                    chat = new { id = chatId },
+                    text
+                }
+            }
+        };
+        return JsonSerializer.Serialize(new { ok = true, result = updates });
+    }
+
     private static string Updates(params object[] values)
     {
         var updates = new List<object>();

@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.23`
+- **Phiên bản:** `1.0.24`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -43,7 +43,7 @@
   - *User Activity Tracking:* Theo dõi thao tác chuột/phím, tạm dừng việc tự động refresh nếu người dùng đang nhập liệu hoặc thao tác.
   - *Sticky Pager Script:* Cố định thanh phân trang (pagination) của Kendo UI grid luôn nổi trên màn hình, giúp duyệt danh sách thuận tiện ở mọi độ phân giải.
   - *Bot Blocker Script:* Ngăn chặn tự động các chatbot AI (`ftmslite.fpt.vn/agent-ai/js/bot.js`) gây chậm trang web FTMS.
-- **`MonitorWebView` (Background Monitor):** WebView2 chạy ngầm (kích thước 1x1 px) độc lập với giao diện chính. Thực hiện polling API `/ihub/request/GetListRequestV12` chu kỳ 2 giây/lần. Hoạt động ngầm liên tục mà không gây giật lag hay ảnh hưởng tới thao tác của người dùng trên giao diện.
+- **`MonitorWebView` (Background Monitor):** WebView2 chạy ngầm (kích thước 1x1 px) độc lập với giao diện chính. Thực hiện polling API `/ihub/request/GetListRequestV12` chu kỳ 2 giây/lần. Được tối ưu hóa gom nhóm trạng thái (Batch Status `1,2,4`), giảm 50% số lượng request mỗi chu kỳ, giúp quét nhanh gấp đôi và siêu nhẹ tải. Hoạt động ngầm liên tục mà không gây giật lag hay ảnh hưởng tới thao tác của người dùng trên giao diện.
 
 ### 2.2. Bảng điều khiển thu nhỏ theo thời gian thực (Compact Dashboard HUD)
 - **Tổng quan hệ thống:**
@@ -76,6 +76,12 @@
 - **Nút tương tác (Inline Keyboard):**
   - `[🔎 Mở ticket]`: Mở liên kết trực tiếp đến trang chỉnh sửa ticket (`/ihub/request/edit/...` hoặc `/ihub/case/edit/...`).
   - `[🙋 Nhận ticket]`: Chỉ xuất hiện trên các ticket ở trạng thái *Tạo mới* hoặc *Phân công*.
+- **Lệnh tra cứu nhanh qua Telegram Bot (Slash Commands):**
+  Kỹ thuật viên có thể nhắn tin trực tiếp với bot bằng các lệnh sau:
+  - `/new` hoặc `/chuanhan`: Liệt kê các ticket mới chưa nhận của phòng TOC DC, kèm nút bấm inline `[🙋 Nhận {code}]` để nhận nhanh trực tiếp từ chat.
+  - `/my` hoặc `/cuatoi`: Tra cứu danh sách ticket được phân công cho tài khoản hiện tại kèm trạng thái và liên kết mở nhanh.
+  - `/sla`: Cảnh báo các ticket đang hoặc sắp vi phạm ngưỡng SLA cam kết.
+  - `/help` hoặc `/start`: Hiển thị bảng trợ giúp và danh sách cú pháp lệnh.
 - **Cơ chế nhận ticket từ xa (Remote Claim Ticket):**
   - Kỹ thuật viên nhấn `[🙋 Nhận ticket]` trên ứng dụng Telegram điện thoại hoặc máy tính.
   - Background receiver (`TelegramCallbackReceiver`) lắng nghe webhook/getUpdates từ Telegram, xác thực chat ID hợp lệ.
@@ -92,8 +98,8 @@
 - Tự động dọn dẹp các ticket đã đóng (`Closed`) từ các ngày trước, chỉ lưu lại ticket đóng trong ngày để phục vụ thống kê dashboard.
 - Tự động chạy WAL Checkpoint và `VACUUM` khi dữ liệu phân mảnh vượt quá 20% dung lượng.
 
-### 2.8. Chạy ngầm Khay hệ thống (System Tray)
-- Khi bấm nút đóng cửa sổ (X), ứng dụng tự động thu nhỏ xuống System Tray và tiếp tục gửi thông báo Telegram ngầm.
+### 2.8. Chạy ngầm Khay hệ thống & Tối ưu RAM (System Tray & Memory Tuning)
+- Khi bấm nút đóng cửa sổ (X) hoặc thu nhỏ cửa sổ, ứng dụng tự động chuyển mức tài nguyên của WebView2 Chromium sang `CoreWebView2MemoryUsageTargetLevel.Low`, giải phóng bộ nhớ RAM và tiếp tục gửi thông báo Telegram ngầm. Khi mở lại, mức tài nguyên tự động khôi phục `Normal`.
 - Menu chuột phải tại khay hệ thống hỗ trợ mở nhanh giao diện hoặc thoát hoàn toàn ứng dụng.
 - Tùy chọn tự động khởi động cùng Windows qua Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
@@ -309,7 +315,7 @@ Hệ thống ưu tiên tối đa tính đúng đắn và tốc độ phát hiệ
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.23.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.24.exe`.
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 
@@ -363,7 +369,7 @@ Chạy script PowerShell đi kèm để tự động publish single-file và đ�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
-Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.23.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
+Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.24.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
 
 ---
 
@@ -381,7 +387,7 @@ dotnet test
 Test run for D:\FTMS-FPT\tests\FTMS.Companion.Tests\bin\Debug\net8.0\FTMS.Companion.Tests.dll (.NETCoreApp,Version=v8.0)
 A total of 1 test files matched the specified pattern.
 
-Passed!  - Failed: 0, Passed: 60, Skipped: 0, Total: 60, Duration: 2 s
+Passed!  - Failed: 0, Passed: 75, Skipped: 0, Total: 75, Duration: 3 s
 ```
 
 ### Các nhóm kiểm thử chính:
@@ -438,4 +444,4 @@ Thư mục này bao gồm:
 
 ---
 
-*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 08/10/2026 cho phiên bản FTMS Companion 1.0.23.*
+*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 08/10/2026 cho phiên bản FTMS Companion 1.0.24.*

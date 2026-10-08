@@ -1,6 +1,8 @@
 using System.IO;
 using System.ComponentModel;
+using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
@@ -29,6 +31,7 @@ public partial class CompactWindow : Window
     private CancellationTokenSource? _accountLifetime;
     private long? _expectedAccountId;
     private long? _activeAccountId;
+    private CurrentUserIdentity? _activeUser;
     private int _visibleNavigationGeneration;
     private int _hiddenReloadAttempts;
     private bool _monitorStarting;
@@ -49,6 +52,7 @@ public partial class CompactWindow : Window
         InitializeComponent(); _settingsStore.Load(); _http = TelegramHttpClientFactory.Create(() => _settingsStore.Current); Loaded += InitializeAsync;
         Closed += (_, _) => { _lifetime.Cancel(); _accountLifetime?.Cancel(); _refreshTimer.Stop(); _http.Dispose(); _trayIcon?.Dispose(); };
         Closing += OnWindowClosing;
+        StateChanged += OnWindowStateChanged;
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();
         InitializeTrayIcon();
     }
@@ -92,6 +96,7 @@ public partial class CompactWindow : Window
     private void HideToTray()
     {
         Hide();
+        SetWebViewMemoryLevel(CoreWebView2MemoryUsageTargetLevel.Low);
         if (_trayIcon is not null)
         {
             _trayIcon.BalloonTipTitle = "FTMS Companion vẫn đang chạy";
@@ -104,7 +109,27 @@ public partial class CompactWindow : Window
     {
         Show();
         WindowState = WindowState.Normal;
+        SetWebViewMemoryLevel(CoreWebView2MemoryUsageTargetLevel.Normal);
         Activate();
+    }
+
+    private void SetWebViewMemoryLevel(CoreWebView2MemoryUsageTargetLevel level)
+    {
+        try
+        {
+            if (FtmsWebView.CoreWebView2 is not null)
+                FtmsWebView.CoreWebView2.MemoryUsageTargetLevel = level;
+            if (MonitorWebView.CoreWebView2 is not null)
+                MonitorWebView.CoreWebView2.MemoryUsageTargetLevel = level;
+        }
+        catch { }
+    }
+
+    private void OnWindowStateChanged(object? sender, EventArgs e)
+    {
+        SetWebViewMemoryLevel(WindowState == WindowState.Minimized
+            ? CoreWebView2MemoryUsageTargetLevel.Low
+            : CoreWebView2MemoryUsageTargetLevel.Normal);
     }
 
     private async void InitializeAsync(object sender, RoutedEventArgs e)
@@ -141,6 +166,7 @@ public partial class CompactWindow : Window
         _telegramReceiver = new TelegramCallbackReceiver(_stateDirectory,
             () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId),
             _http, ClaimTicketFromTelegramAsync,
+            HandleTelegramCommandAsync,
             message => Dispatcher.BeginInvoke(() => MonitorText.Text = TelegramErrorSanitizer.Sanitize(
                 message, _settingsStore.Current.TelegramToken)));
         _ftmsClient.LoginRecoveryStatusChanged += OnMonitorLoginRecoveryStatusChanged;
@@ -236,7 +262,7 @@ public partial class CompactWindow : Window
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
     }
 
-    private async void OnVisibleFtmsResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
+    private void OnVisibleFtmsResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
     {
         var monitor = _monitor;
         var accountLifetime = _accountLifetime;
@@ -435,6 +461,7 @@ public partial class CompactWindow : Window
         _accountLifetime = null;
         _expectedAccountId = null;
         _activeAccountId = null;
+        _activeUser = null;
         _monitor = null;
         _monitorStarted = false;
         _monitorStarting = false;
@@ -625,8 +652,184 @@ public partial class CompactWindow : Window
         return result;
     }
 
+    private Task<TelegramCommandResponse?> HandleTelegramCommandAsync(string text, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(text) || !text.StartsWith('/'))
+            return Task.FromResult<TelegramCommandResponse?>(null);
+
+        var cmd = text.Trim().Split(' ', 2)[0].Split('@', 2)[0].ToLowerInvariant();
+        var monitor = _monitor;
+
+        switch (cmd)
+        {
+            case "/start" or "/help":
+            {
+                var helpText = new StringBuilder();
+                helpText.AppendLine("🤖 <b>TRỢ LÝ BOT FTMS (TOC DATA CENTER)</b>");
+                helpText.AppendLine();
+                helpText.AppendLine("• <code>/new</code> hoặc <code>/chuanhan</code>: Tra cứu ticket chưa nhận (kèm nút nhận nhanh).");
+                helpText.AppendLine("• <code>/my</code> hoặc <code>/cuatoi</code>: Tra cứu ticket đang xử lý của bạn.");
+                helpText.AppendLine("• <code>/sla</code>: Tra cứu ticket sắp hoặc đã vi phạm SLA.");
+                helpText.AppendLine("• <code>/help</code>: Hướng dẫn các lệnh bot.");
+                return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse(helpText.ToString().Trim()));
+            }
+
+            case "/new" or "/chuanhan":
+            {
+                if (monitor is null)
+                    return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse("⚠️ <i>Hệ thống giám sát đang khởi động, vui lòng thử lại sau giây lát...</i>"));
+
+                var active = monitor.GetActiveSnapshots();
+                var unassigned = active.Where(x => (x.Status is TicketStatus.New or TicketStatus.Assigned) &&
+                    (x.AssigneeId is null or 0) &&
+                    (string.IsNullOrWhiteSpace(x.AssigneeName) || x.AssigneeName.Trim() == "---" || x.AssigneeName.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase)))
+                    .OrderBy(x => x.CreatedAt)
+                    .ToList();
+
+                if (unassigned.Count == 0)
+                {
+                    return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse(
+                        "✅ <b>Hiện tại không có ticket nào chưa nhận!</b>\nToàn bộ ticket phòng TOC DC đã được phân công/tiếp nhận."));
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"📋 <b>DANH SÁCH TICKET CHƯA NHẬN ({unassigned.Count}):</b>");
+                sb.AppendLine();
+
+                var buttons = new List<object[]>();
+                var maxDisplay = Math.Min(unassigned.Count, 5);
+                for (var i = 0; i < maxDisplay; i++)
+                {
+                    var t = unassigned[i];
+                    var waitMinutes = t.CreatedAt is null ? 0 : Math.Max(0, (int)(DateTimeOffset.UtcNow - t.CreatedAt.Value).TotalMinutes);
+                    var timeStr = t.CreatedAt is not null
+                        ? t.CreatedAt.Value.ToOffset(TimeSpan.FromHours(7)).ToString("HH:mm")
+                        : "---";
+                    var title = WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(t.Title) ? "Không có tiêu đề" : t.Title.Trim());
+                    if (title.Length > 45) title = title[..45] + "...";
+
+                    sb.AppendLine($"{i + 1}. 🆔 <code>{t.Code}</code> - <b>{title}</b>");
+                    sb.AppendLine($"   ⏰ Tạo: {timeStr} | ⏱ Chờ: {waitMinutes} phút");
+
+                    var route = t.Code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) || t.Code.StartsWith("AL", StringComparison.OrdinalIgnoreCase) ? "case" : "request";
+                    var openUrl = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(t.Code)}";
+                    buttons.Add([
+                        new { text = $"🙋 Nhận {t.Code}", callback_data = $"receive:{t.Code}" },
+                        new { text = $"🔎 Mở {t.Code}", url = openUrl }
+                    ]);
+                }
+
+                if (unassigned.Count > maxDisplay)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine($"<i>... và còn {unassigned.Count - maxDisplay} ticket khác.</i>");
+                }
+
+                return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse(sb.ToString().Trim(), buttons.ToArray()));
+            }
+
+            case "/my" or "/cuatoi":
+            {
+                if (monitor is null)
+                    return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse("⚠️ <i>Hệ thống giám sát đang khởi động, vui lòng thử lại sau giây lát...</i>"));
+
+                var currentUser = _activeUser;
+                if (currentUser is null)
+                    return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse("⚠️ <i>Chưa xác định được tài khoản FTMS đăng nhập hiện tại.</i>"));
+
+                var active = monitor.GetActiveSnapshots();
+                var personal = active.Where(x => x.AssigneeId == currentUser.UserId)
+                    .OrderBy(x => x.Status)
+                    .ThenBy(x => x.CreatedAt)
+                    .ToList();
+
+                if (personal.Count == 0)
+                {
+                    return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse(
+                        $"✅ <b>Kỹ thuật viên {WebUtility.HtmlEncode(currentUser.UserName ?? "")} hiện không có ticket nào đang xử lý!</b>"));
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"👨‍💼 <b>TICKET ĐANG XỬ LÝ - {WebUtility.HtmlEncode(currentUser.UserName ?? "")} ({personal.Count}):</b>");
+                sb.AppendLine();
+
+                var buttons = new List<object[]>();
+                var maxDisplay = Math.Min(personal.Count, 5);
+                for (var i = 0; i < maxDisplay; i++)
+                {
+                    var t = personal[i];
+                    var statusName = t.Status.DisplayName();
+                    var title = WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(t.Title) ? "Không có tiêu đề" : t.Title.Trim());
+                    if (title.Length > 45) title = title[..45] + "...";
+
+                    sb.AppendLine($"{i + 1}. 🆔 <code>{t.Code}</code> [{statusName}]");
+                    sb.AppendLine($"   📝 {title}");
+
+                    var route = t.Code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) || t.Code.StartsWith("AL", StringComparison.OrdinalIgnoreCase) ? "case" : "request";
+                    var openUrl = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(t.Code)}";
+                    buttons.Add([new { text = $"🔎 Mở {t.Code}", url = openUrl }]);
+                }
+
+                if (personal.Count > maxDisplay)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine($"<i>... và còn {personal.Count - maxDisplay} ticket khác.</i>");
+                }
+
+                return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse(sb.ToString().Trim(), buttons.ToArray()));
+            }
+
+            case "/sla":
+            {
+                if (monitor is null)
+                    return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse("⚠️ <i>Hệ thống giám sát đang khởi động, vui lòng thử lại sau giây lát...</i>"));
+
+                var active = monitor.GetActiveSnapshots();
+                var slaTickets = active.Where(x => x.SlaType is 2 or 3)
+                    .OrderByDescending(x => x.SlaType)
+                    .ThenBy(x => x.SlaDeviationMinutes)
+                    .ToList();
+
+                if (slaTickets.Count == 0)
+                {
+                    return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse(
+                        "✅ <b>Tuyệt vời! Hiện tại phòng TOC không có ticket nào vi phạm hoặc sắp vi phạm SLA.</b>"));
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"🚨 <b>CẢNH BÁO SLA PHÒNG TOC ({slaTickets.Count}):</b>");
+                sb.AppendLine();
+
+                var buttons = new List<object[]>();
+                var maxDisplay = Math.Min(slaTickets.Count, 5);
+                for (var i = 0; i < maxDisplay; i++)
+                {
+                    var t = slaTickets[i];
+                    var slaLabel = t.SlaType == 3 ? "🔴 ĐÃ VI PHẠM" : "🟠 SẮP VI PHẠM";
+                    var slaTime = t.SlaDeviationMinutes is not null
+                        ? (t.SlaType == 3 ? $"{Math.Abs(t.SlaDeviationMinutes.Value)} phút" : $"còn {t.SlaDeviationMinutes.Value} phút")
+                        : "";
+                    var assignee = WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(t.AssigneeName) ? "Chưa nhận" : t.AssigneeName.Trim());
+
+                    sb.AppendLine($"{i + 1}. 🆔 <code>{t.Code}</code> - {slaLabel} ({slaTime})");
+                    sb.AppendLine($"   👨‍💼 Xử lý: {assignee}");
+
+                    var route = t.Code.StartsWith("CA", StringComparison.OrdinalIgnoreCase) || t.Code.StartsWith("AL", StringComparison.OrdinalIgnoreCase) ? "case" : "request";
+                    var openUrl = $"https://ftms.fpt.net/ihub/{route}/edit/{Uri.EscapeDataString(t.Code)}";
+                    buttons.Add([new { text = $"🔎 Mở {t.Code}", url = openUrl }]);
+                }
+
+                return Task.FromResult<TelegramCommandResponse?>(new TelegramCommandResponse(sb.ToString().Trim(), buttons.ToArray()));
+            }
+
+            default:
+                return Task.FromResult<TelegramCommandResponse?>(null);
+        }
+    }
+
     private void UpdateDashboard(DashboardSummary s)
     {
+        _activeUser = s.CurrentUser;
         GlobalNewValue.Text = s.New.ToString("N0");
 
         if (!s.HasCurrentUser)
