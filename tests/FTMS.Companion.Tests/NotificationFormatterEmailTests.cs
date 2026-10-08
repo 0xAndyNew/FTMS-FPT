@@ -649,6 +649,95 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains(System.Net.WebUtility.HtmlEncode("Nhờ add template tin nhắn Zalo"), message);
     }
 
+    [Fact]
+    public void NotificationFormatter_CreatedEvent_DoesNotIncludeUnassignedElapsedMinutes()
+    {
+        var createdAt = new DateTimeOffset(2026, 10, 8, 8, 58, 0, TimeSpan.FromHours(7));
+        var detectedAt = createdAt.AddMinutes(1);
+        var snapshot = new TicketSnapshot
+        {
+            Code = "RQ202610080017",
+            Status = TicketStatus.New,
+            CreatedAt = createdAt,
+            AssigneeName = "Chưa nhận"
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "created-test-key",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.Created,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = detectedAt,
+            Reason = "Phát hiện ticket mới",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET MỚI", message);
+        Assert.Contains("Thời gian tạo:</b> 08/10/2026 08:58 (UTC+07:00)", message);
+        Assert.DoesNotContain("Thời gian chưa nhận ticket", message);
+        Assert.DoesNotContain("Thời gian từ lúc tạo ticket", message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_UnassignedReminder_IncludesUnassignedElapsedMinutes()
+    {
+        var createdAt = new DateTimeOffset(2026, 10, 8, 8, 58, 0, TimeSpan.FromHours(7));
+        var detectedAt = createdAt.AddMinutes(15);
+        var snapshot = new TicketSnapshot
+        {
+            Code = "RQ202610080017",
+            Status = TicketStatus.New,
+            CreatedAt = createdAt,
+            AssigneeName = "Chưa nhận"
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "reminder-test-key",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.UnassignedReminder,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = detectedAt,
+            Reason = "Ticket chưa được nhận sau 15 phút",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("NHẮC TICKET CHƯA ĐƯỢC NHẬN", message);
+        Assert.Contains("Thời gian chưa nhận ticket:</b> 15 phút", message);
+    }
+
+    [Theory]
+    [InlineData(TicketStatus.Assigned)]
+    [InlineData(TicketStatus.InProgress)]
+    [InlineData(TicketStatus.New)]
+    [InlineData(TicketStatus.Paused)]
+    [InlineData(TicketStatus.Completed)]
+    public void NotificationFormatter_EmailReceived_AcrossStatuses_AlwaysUsesResponseTitle(TicketStatus status)
+    {
+        var sentAt = new DateTimeOffset(2026, 10, 8, 9, 15, 0, TimeSpan.FromHours(7));
+        var email = Email("200", sentAt, "Khách hàng phản hồi thêm thông tin");
+        var snapshot = Snapshot("IN202610080050", status, email, sentAt);
+        var evt = new TicketEvent
+        {
+            EventKey = "email-received-key",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.EmailReceived,
+            CurrentStatus = status,
+            DetectedAt = sentAt.AddSeconds(5),
+            Reason = "FTMS có email mới",
+            LatestEmail = email,
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+        Assert.DoesNotContain("EMAIL MỚI CỦA TICKET", message);
+    }
+
     private static LatestEmail Email(string id, DateTimeOffset sentAt, string body) =>
         new(id, sentAt, "sender@fpt.com", "Tiêu đề kiểm thử", body);
 

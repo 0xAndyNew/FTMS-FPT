@@ -24,7 +24,7 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.21`
+- **Phiên bản:** `1.0.22`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
 - **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
@@ -309,7 +309,7 @@ Hệ thống ưu tiên tối đa tính đúng đắn và tốc độ phát hiệ
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.21.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.22.exe`.
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 
@@ -363,7 +363,7 @@ Chạy script PowerShell đi kèm để tự động publish single-file và đ�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
-Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.21.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
+Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.22.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
 
 ---
 
@@ -438,4 +438,4 @@ Thư mục này bao gồm:
 
 ---
 
-*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 07/10/2026 cho phiên bản FTMS Companion 1.0.21.*
+*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 08/10/2026 cho phiên bản FTMS Companion 1.0.22.*

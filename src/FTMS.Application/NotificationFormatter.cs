@@ -15,8 +15,7 @@ public static partial class NotificationFormatter
         text.AppendLine(item.EventType switch
         {
             TicketEventType.Created => "📨 <b>🔴 TICKET MỚI</b>",
-            TicketEventType.EmailReceived when ticket.Status == TicketStatus.Paused => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
-            TicketEventType.EmailReceived => "📧 <b>🔴 EMAIL MỚI CỦA TICKET</b>",
+            TicketEventType.EmailReceived => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
             TicketEventType.UnassignedReminder => "🔔 <b>🟠 NHẮC TICKET CHƯA ĐƯỢC NHẬN</b>",
             TicketEventType.ResponseReminder => "🔔 <b>🟠 NHẮC TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
             TicketEventType.SlaThresholdReached when ticket.SlaType == 3 => "🚨 <b>🔴 ĐÃ VI PHẠM SLA</b>",
@@ -58,7 +57,7 @@ public static partial class NotificationFormatter
         if (ticket.CreatedAt is not null)
             text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value, includeSeconds: false)}");
         var ageMinutes = ticket.CreatedAt is null ? 0 : Math.Max(0, (int)(item.DetectedAt - ticket.CreatedAt.Value).TotalMinutes);
-        if (item.EventType is TicketEventType.Created or TicketEventType.UnassignedReminder)
+        if (item.EventType == TicketEventType.UnassignedReminder)
             text.AppendLine($"⏱ <b>Thời gian chưa nhận ticket:</b> {ageMinutes} phút");
         else if (item.EventType == TicketEventType.ResponseReminder)
         {
@@ -66,7 +65,8 @@ public static partial class NotificationFormatter
                 Math.Max(0, (int)(item.DetectedAt - ticket.ResponseReminderSince.Value).TotalMinutes);
             text.AppendLine($"⏱ <b>Thời gian từ lúc có phản hồi mới:</b> {responseMinutes} phút");
         }
-        else if (item.EventType != TicketEventType.Terminal || ticket.Status != TicketStatus.Closed)
+        else if (item.EventType != TicketEventType.Created &&
+                 (item.EventType != TicketEventType.Terminal || ticket.Status != TicketStatus.Closed))
             text.AppendLine($"🕰 <b>Thời gian từ lúc tạo ticket:</b> {ageMinutes} phút");
         var changeTime = item.ChangedAt ?? (ticket.Status == TicketStatus.Closed ? ticket.UpdatedAt : null);
         if (isStatusTransition && changeTime is not null)
