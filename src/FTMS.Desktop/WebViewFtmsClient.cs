@@ -1210,25 +1210,32 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   historySucceeded = true;
                   let history = unwrapRows(await historyResponse.json());
                   if (history.length) {
-                    const dateValue = value => {
-                      const fallback = Object.entries(value || {}).find(([key, fieldValue]) =>
-                        /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
-                      const raw = value?.sendDate || value?.SendDate || value?.sentDate || value?.SentDate ||
-                        value?.emailDate || value?.EmailDate ||
-                        value?.createDate || value?.CreateDate || value?.createdDate || value?.CreatedDate ||
-                        value?.date || value?.Date || fallback;
-                      const parsed = parseMailDate(raw); return parsed?.getTime() || 0;
+                    const normalizedHistory = history.map(mail => ({
+                      mail,
+                      fields: Object.fromEntries(Object.entries(mail || {}).map(([key, value]) =>
+                        [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]))
+                    }));
+                    const field = (fields, ...names) => {
+                      for (const name of names) {
+                        const value = fields[name.replace(/[^a-z0-9]/gi, '').toLowerCase()];
+                        if (value !== undefined && value !== null && value !== '') return value;
+                      }
+                      return null;
                     };
-                    history.sort((a, b) => dateValue(b) - dateValue(a) || Number(b.id || b.Id || 0) - Number(a.id || a.Id || 0));
-                    for (const mail of history) {
-                      const normalizedMail = Object.fromEntries(Object.entries(mail || {}).map(([key, value]) => [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]));
-                      const mailField = (...names) => {
-                        for (const name of names) {
-                          const value = normalizedMail[name.replace(/[^a-z0-9]/gi, '').toLowerCase()];
-                          if (value !== undefined && value !== null && value !== '') return value;
-                        }
-                        return null;
-                      };
+                    const sentAtValue = (mail, fields) => field(fields,
+                      'lasttimeresponse', 'lastresponsetime', 'timeresponse', 'responsetime',
+                      'senddate', 'sentdate', 'emaildate', 'createdate', 'createddate', 'date', 'sentat') ||
+                      Object.entries(mail || {}).find(([key, fieldValue]) =>
+                        /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
+                    normalizedHistory.sort((a, b) => {
+                      const leftTime = parseMailDate(sentAtValue(a.mail, a.fields))?.getTime() || 0;
+                      const rightTime = parseMailDate(sentAtValue(b.mail, b.fields))?.getTime() || 0;
+                      const leftId = Number(field(a.fields, 'id', 'emailhistoryid', 'maxeh')) || 0;
+                      const rightId = Number(field(b.fields, 'id', 'emailhistoryid', 'maxeh')) || 0;
+                      return rightTime - leftTime || rightId - leftId;
+                    });
+                    for (const { mail, fields } of normalizedHistory) {
+                      const mailField = (...names) => field(fields, ...names);
                       const emailId = mailField('id', 'emailhistoryid', 'maxeh');
                       const fileId = extractFileId(mail);
                       let body = '';
@@ -1246,11 +1253,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       }
                       if (ignoredSender(sender, mailField('poster', 'mailposter', 'sender', 'from')) ||
                           automatedReceipt(body)) continue;
-                      const fallbackDate = Object.entries(mail).find(([key, fieldValue]) =>
-                        /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
-                      const rawDate = mailField('senddate', 'sentdate', 'emaildate', 'createdate', 'createddate',
-                        'date', 'lasttimeresponse', 'lastresponsetime', 'timeresponse', 'responsetime', 'sentat') || fallbackDate;
-                      const parsedDate = parseMailDate(rawDate);
+                      const parsedDate = parseMailDate(sentAtValue(mail, fields));
                       return JSON.stringify({ id: String(emailId || fileId || ''),
                         sentAt: parsedDate?.toISOString() || null,
                         from: sender, subject: mailField('subject', 'emailsubject', 'title') || null, body });
@@ -1277,7 +1280,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const historyValue = row => {
                   const normalized = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]));
                   const rawDate = normalized.lasttimeresponse || normalized.lastresponsetime || normalized.timeresponse ||
-                    normalized.responsetime || normalized.senddate || normalized.sentat || normalized.createdate;
+                    normalized.responsetime || normalized.senddate || normalized.sentdate || normalized.emaildate ||
+                    normalized.createdate || normalized.createddate || normalized.date || normalized.sentat;
                   const parsed = parseMailDate(rawDate)?.getTime() || 0;
                   const rawId = normalized.maxeh || normalized.emailhistoryid || normalized.id || 0;
                   return { time: Number.isNaN(parsed) ? 0 : parsed, id: Number(rawId) || 0 };
@@ -1300,7 +1304,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   let body = '';
                   if (fileId) body = await readMailFile(fileId);
                   if (!body) body = field('CONTENTS', 'CONTENT', 'BODY', 'DESCRIPTION', 'REQUEST_CONTENT', 'DETAIL') || '';
-                  const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME', 'SEND_DATE', 'SENT_AT', 'CREATE_DATE');
+                  const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME',
+                    'SEND_DATE', 'SENT_DATE', 'EMAIL_DATE', 'CREATE_DATE', 'CREATED_DATE', 'DATE', 'SENT_AT');
                   const parsedSentAt = parseMailDate(rawSentAt);
                   let sentAt = parsedSentAt?.toISOString() || null;
                   let sender = ['MAIL_POSTER', 'POSTER_EMAIL', 'POSTER', 'SENDER_EMAIL', 'SENDER',

@@ -486,22 +486,27 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
-    public async Task ChangeDetector_StatusChange_UsesCompleteListEmailWithoutRefreshingHistory()
+    public async Task ChangeDetector_ResponseStatusRefreshesCompleteCacheAndUsesNewestEligibleEmail()
     {
-        var sentAt = DateTimeOffset.UtcNow;
-        var email = new LatestEmail("100", sentAt.AddMinutes(-38), "TrungNT105@fpt.com",
-            "Tiêu đề kiểm thử", "Nội dung phản hồi đầy đủ");
-        var oldSnapshot = Snapshot("RQ202610070261", TicketStatus.Paused, email, sentAt.AddMinutes(-5));
+        var oldEmail = new LatestEmail("2952340",
+            new DateTimeOffset(2026, 10, 9, 12, 47, 57, TimeSpan.FromHours(7)),
+            "DuyBD4@fpt.com", "Tiêu đề phản hồi cũ", "Nội dung phản hồi cũ của Duy");
+        var newEmail = new LatestEmail("2952401",
+            new DateTimeOffset(2026, 10, 9, 13, 44, 9, TimeSpan.FromHours(7)),
+            "chiennh29@ghtk.co", "Tiêu đề phản hồi mới", "Nội dung phản hồi mới nhất của Chien");
+        var changedAt = new DateTimeOffset(2026, 10, 9, 13, 44, 26, TimeSpan.FromHours(7));
+        var oldSnapshot = Snapshot("RQ202610090190", TicketStatus.Paused, oldEmail,
+            changedAt.AddMinutes(-5));
         var currentSnapshot = oldSnapshot with
         {
             Status = TicketStatus.InProgress,
-            UpdatedAt = sentAt
+            UpdatedAt = changedAt
         };
         var calls = 0;
         var client = new TestFtmsClient(() =>
         {
             calls++;
-            return null;
+            return newEmail;
         });
 
         var events = await new TicketChangeDetector().DetectAsync(
@@ -509,14 +514,90 @@ public sealed class NotificationFormatterEmailTests
             [currentSnapshot], client, new AppSettings(), CancellationToken.None);
 
         var statusEvent = Assert.Single(events, e => e.EventType == TicketEventType.StatusChanged);
-        Assert.Equal("100", statusEvent.LatestEmail?.Id);
-        Assert.Equal(email.Body, statusEvent.LatestEmail?.Body);
+        Assert.Equal(1, calls);
+        Assert.Equal("FTMS có email mới", statusEvent.Reason);
+        Assert.Equal(newEmail, statusEvent.LatestEmail);
+        Assert.Equal(newEmail, statusEvent.Snapshot.LatestEmail);
         Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
-        Assert.Equal(0, calls);
 
         var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("From: TrungNT105@fpt.com", message);
-        Assert.Contains("Nội dung phản hồi đầy đủ", message);
+        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+        Assert.Contains("From: chiennh29@ghtk.co", message);
+        Assert.Contains("Time: 13:44:09 09/10/2026", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(newEmail.Body!), message);
+        Assert.DoesNotContain("DuyBD4@fpt.com", message);
+        Assert.DoesNotContain(System.Net.WebUtility.HtmlEncode(oldEmail.Body!), message);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_ResponseStatusWithoutNewEmailRemainsNormalStatusChange()
+    {
+        var sentAt = new DateTimeOffset(2026, 10, 9, 12, 47, 57, TimeSpan.FromHours(7));
+        var email = new LatestEmail("2952340", sentAt, "DuyBD4@fpt.com",
+            "Tiêu đề kiểm thử", "Nội dung phản hồi đã lưu");
+        var oldSnapshot = Snapshot("RQ202610090191", TicketStatus.Paused, email,
+            sentAt.AddMinutes(5));
+        var currentSnapshot = oldSnapshot with
+        {
+            Status = TicketStatus.InProgress,
+            UpdatedAt = sentAt.AddMinutes(10)
+        };
+        var calls = 0;
+        var client = new TestFtmsClient(() =>
+        {
+            calls++;
+            return email;
+        });
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot> { [oldSnapshot.Code] = oldSnapshot },
+            [currentSnapshot], client, new AppSettings(), CancellationToken.None);
+
+        var statusEvent = Assert.Single(events, e => e.EventType == TicketEventType.StatusChanged);
+        Assert.Equal(2, calls);
+        Assert.Equal("Trạng thái ticket đã thay đổi", statusEvent.Reason);
+        Assert.Equal(email, statusEvent.LatestEmail);
+        Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
+
+        var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("THAY ĐỔI TRẠNG THÁI", message);
+        Assert.DoesNotContain("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_ResponseStatusDoesNotReplaceEligibleCacheWithExcludedEmail()
+    {
+        var sentAt = new DateTimeOffset(2026, 10, 9, 12, 47, 57, TimeSpan.FromHours(7));
+        var cachedEmail = new LatestEmail("2952340", sentAt, "customer@example.com",
+            "Tiêu đề hợp lệ", "Nội dung hợp lệ đã lưu");
+        var excludedEmail = new LatestEmail("2952401", sentAt.AddHours(1), "fti.sd02@fpt.com",
+            "Thông báo tự động", "Nội dung thông báo tự động");
+        var oldSnapshot = Snapshot("RQ202610090192", TicketStatus.Paused, cachedEmail,
+            sentAt.AddMinutes(5));
+        var currentSnapshot = oldSnapshot with
+        {
+            Status = TicketStatus.InProgress,
+            UpdatedAt = sentAt.AddHours(1)
+        };
+        var calls = 0;
+        var client = new TestFtmsClient(() =>
+        {
+            calls++;
+            return excludedEmail;
+        });
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot> { [oldSnapshot.Code] = oldSnapshot },
+            [currentSnapshot], client, new AppSettings(), CancellationToken.None);
+
+        var statusEvent = Assert.Single(events, e => e.EventType == TicketEventType.StatusChanged);
+        Assert.Equal(2, calls);
+        Assert.Equal("Trạng thái ticket đã thay đổi", statusEvent.Reason);
+        Assert.Equal(cachedEmail, statusEvent.LatestEmail);
+        var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("From: customer@example.com", message);
+        Assert.DoesNotContain("fti.sd02@fpt.com", message);
+        Assert.DoesNotContain("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
     }
 
     [Fact]
@@ -786,8 +867,8 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("TICKET ĐÃ ĐÓNG", message);
         Assert.Contains("Người xử lý:</b> AnhHVN3 - TOC - Ph&#242;ng Dịch vụ Data Center", message);
         Assert.DoesNotContain("Chưa nhận", message);
-        Assert.Contains("07/10/2026 16:48", message);
-        Assert.DoesNotContain("10/07/2026 16:48", message);
+        Assert.Contains("16:48:02 07/10/2026", message);
+        Assert.DoesNotContain("16:48:02 10/07/2026", message);
         Assert.Contains("<blockquote>", message);
         Assert.Contains("From: customer@unilever.com", message);
         Assert.Contains("ZBS_Hỗ trợ add temp cho KH UNow Unilever_07/10/2026", message);
@@ -820,7 +901,7 @@ public sealed class NotificationFormatterEmailTests
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
 
         Assert.Contains("TICKET MỚI", message);
-        Assert.Contains("Thời gian tạo:</b> 08/10/2026 08:58 (UTC+07:00)", message);
+        Assert.Contains("Thời gian tạo:</b> 08:58:00 08/10/2026", message);
         Assert.DoesNotContain("Thời gian chưa nhận ticket", message);
         Assert.DoesNotContain("Thời gian từ lúc tạo ticket", message);
     }
@@ -907,8 +988,8 @@ public sealed class NotificationFormatterEmailTests
 
         Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
         Assert.Contains("Trạng thái:</b> Đang thực hiện", message);
-        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:15 (UTC+07:00)", message);
-        Assert.Contains("Time: 08/10/2026 09:14:30 (UTC+07:00)", message);
+        Assert.Contains("Thời gian thay đổi:</b> 09:15:00 08/10/2026", message);
+        Assert.Contains("Time: 09:14:30 08/10/2026", message);
     }
 
     [Fact]
@@ -936,8 +1017,8 @@ public sealed class NotificationFormatterEmailTests
 
         Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
         Assert.Contains("Trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", message);
-        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:15 (UTC+07:00)", message);
-        Assert.Contains("Time: 08/10/2026 09:14:00 (UTC+07:00)", message);
+        Assert.Contains("Thời gian thay đổi:</b> 09:15:00 08/10/2026", message);
+        Assert.Contains("Time: 09:14:00 08/10/2026", message);
     }
 
     [Fact]
@@ -965,7 +1046,7 @@ public sealed class NotificationFormatterEmailTests
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
 
         Assert.Contains("TICKET ĐÃ CÓ NGƯỜI NHẬN", message);
-        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:20 (UTC+07:00)", message);
+        Assert.Contains("Thời gian thay đổi:</b> 09:20:00 08/10/2026", message);
     }
 
     [Fact]
@@ -990,7 +1071,7 @@ public sealed class NotificationFormatterEmailTests
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
 
         Assert.Contains("TICKET ĐÃ ĐÓNG", message);
-        Assert.Contains("Thời gian thay đổi:</b> 08/10/2026 09:30 (UTC+07:00)", message);
+        Assert.Contains("Thời gian thay đổi:</b> 09:30:00 08/10/2026", message);
     }
 
     [Fact]
@@ -1015,7 +1096,7 @@ public sealed class NotificationFormatterEmailTests
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
 
         Assert.Contains("TICKET MỚI", message);
-        Assert.Contains("Thời gian tạo:</b> 08/10/2026 09:00 (UTC+07:00)", message);
+        Assert.Contains("Thời gian tạo:</b> 09:00:00 08/10/2026", message);
         Assert.DoesNotContain("Thời gian thay đổi", message);
     }
 

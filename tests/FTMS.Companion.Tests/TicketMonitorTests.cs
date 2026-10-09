@@ -356,6 +356,66 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task Poll_ResponseStatusUsesNewestEmailFromHistoryInsteadOfCompleteCachedEmail()
+    {
+        var oldEmail = new LatestEmail("2952340",
+            new DateTimeOffset(2026, 10, 9, 12, 47, 57, TimeSpan.FromHours(7)),
+            "DuyBD4@fpt.com", "Tiêu đề phản hồi cũ", "Nội dung phản hồi cũ của Duy");
+        var newEmail = new LatestEmail("2952401",
+            new DateTimeOffset(2026, 10, 9, 13, 44, 9, TimeSpan.FromHours(7)),
+            "chiennh29@ghtk.co", "Tiêu đề phản hồi mới", "Nội dung phản hồi mới nhất của Chien");
+        var changedAt = new DateTimeOffset(2026, 10, 9, 13, 44, 26, TimeSpan.FromHours(7));
+        var paused = new TicketSnapshot
+        {
+            Code = "RQ202610090190",
+            Status = TicketStatus.Paused,
+            Title = "Tiêu đề ticket",
+            CreatedAt = changedAt.AddHours(-1),
+            UpdatedAt = changedAt.AddMinutes(-5),
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 42,
+            AssigneeName = "HieuDX2",
+            LatestEmail = oldEmail
+        };
+        var resumed = paused with
+        {
+            Status = TicketStatus.InProgress,
+            UpdatedAt = changedAt
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(42, "HieuDX2", null, null), [resumed])
+        {
+            LatestEmail = newEmail
+        };
+        var store = new MemoryStore();
+        store.InitialSnapshots[paused.Code] = paused;
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var statusEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == paused.Code && item.EventType == TicketEventType.StatusChanged);
+        Assert.Equal(1, client.GetLatestEmailCallCount);
+        Assert.Equal("FTMS có email mới", statusEvent.Reason);
+        Assert.Equal(newEmail, statusEvent.LatestEmail);
+        Assert.Equal(newEmail, statusEvent.Snapshot.LatestEmail);
+        Assert.DoesNotContain(store.SavedEvents, item =>
+            item.TicketCode == paused.Code && item.EventType == TicketEventType.EmailReceived);
+        Assert.Equal(newEmail, monitor.GetActiveSnapshots().Single(item =>
+            item.Code == paused.Code).LatestEmail);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+        Assert.Contains("From: chiennh29@ghtk.co", message);
+        Assert.Contains("Time: 13:44:09 09/10/2026", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(newEmail.Body!), message);
+        Assert.DoesNotContain("DuyBD4@fpt.com", message);
+        Assert.DoesNotContain(System.Net.WebUtility.HtmlEncode(oldEmail.Body!), message);
+    }
+
+    [Fact]
     public async Task ApplyConfirmedStatusMutation_ImmediatelyEnqueuesEventAndPreventsRollback()
     {
         var ticket = new TicketSnapshot

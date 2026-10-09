@@ -85,17 +85,18 @@ public sealed class TicketChangeDetector
             if (evt.EventType is not (TicketEventType.Created or TicketEventType.StatusChanged or TicketEventType.Terminal or TicketEventType.AssignmentChanged))
                 continue;
 
+            var isResponseTransition = evt.EventType == TicketEventType.StatusChanged &&
+                evt.PreviousStatus == TicketStatus.Paused &&
+                evt.CurrentStatus == TicketStatus.InProgress;
             var enriched = await ResolveLatestEmailForNotificationAsync(client, evt.TicketCode, cancellationToken,
-                evt.LatestEmail, evt.Snapshot.LatestEmail);
+                isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
             if (enriched is null) continue;
 
+            previous.TryGetValue(evt.TicketCode, out var previousSnapshot);
             var enrichedSnapshot = evt.Snapshot with { LatestEmail = enriched };
-            var reason = evt.EventType == TicketEventType.StatusChanged &&
-                evt.PreviousStatus == TicketStatus.Paused &&
-                evt.CurrentStatus == TicketStatus.InProgress &&
-                !enriched.IsExcluded()
-                    ? "FTMS có email mới"
-                    : evt.Reason;
+            var reason = isResponseTransition && IsNewEmail(previousSnapshot?.LatestEmail, enriched)
+                ? "FTMS có email mới"
+                : evt.Reason;
             result[i] = evt with
             {
                 Reason = reason,
@@ -285,11 +286,17 @@ public sealed class TicketChangeDetector
         }
     }
 
+    internal static Task<LatestEmail?> ResolveLatestEmailForNotificationAsync(IFtmsClient client,
+        string code, CancellationToken cancellationToken, params LatestEmail?[] cachedCandidates) =>
+        ResolveLatestEmailForNotificationAsync(client, code, cancellationToken,
+            refreshEvenWhenComplete: false, cachedCandidates);
+
     internal static async Task<LatestEmail?> ResolveLatestEmailForNotificationAsync(IFtmsClient client,
-        string code, CancellationToken cancellationToken, params LatestEmail?[] cachedCandidates)
+        string code, CancellationToken cancellationToken, bool refreshEvenWhenComplete,
+        params LatestEmail?[] cachedCandidates)
     {
         var cachedLatest = SelectEmail(cachedCandidates);
-        if (IsCompleteEmail(cachedLatest)) return cachedLatest;
+        if (!refreshEvenWhenComplete && IsCompleteEmail(cachedLatest)) return cachedLatest;
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(7));

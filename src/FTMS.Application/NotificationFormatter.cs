@@ -31,8 +31,7 @@ public static partial class NotificationFormatter
                 _ => "✅ <b>🟢 TICKET KẾT THÚC</b>"
             },
             TicketEventType.StatusChanged when ticket.Status == TicketStatus.InProgress &&
-                (item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) ||
-                 (item.PreviousStatus == TicketStatus.Paused && email is not null)) => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
+                item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
             TicketEventType.StatusChanged => "🔄 <b>🔵 THAY ĐỔI TRẠNG THÁI</b>",
             TicketEventType.AssignmentChanged => AssignmentTitle(item),
             _ => "📣 <b>🔵 CẬP NHẬT TICKET</b>"
@@ -59,7 +58,7 @@ public static partial class NotificationFormatter
             not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
             text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
         if (ticket.CreatedAt is not null)
-            text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value, includeSeconds: false)}");
+            text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value)}");
         var ageMinutes = ticket.CreatedAt is null ? 0 : Math.Max(0, (int)(item.DetectedAt - ticket.CreatedAt.Value).TotalMinutes);
         if (item.EventType == TicketEventType.UnassignedReminder)
             text.AppendLine($"⏱ <b>Thời gian chưa nhận ticket:</b> {ageMinutes} phút");
@@ -79,7 +78,7 @@ public static partial class NotificationFormatter
         DateTimeOffset? changeTime = item.ChangedAt ?? ticket.UpdatedAt ??
             (item.EventType == TicketEventType.EmailReceived ? email?.SentAt : null) ?? item.DetectedAt;
         if (shouldShowChangeTime && changeTime is not null)
-            text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value, includeSeconds: false)}");
+            text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value)}");
         if (item.EventType == TicketEventType.AssignmentChanged)
         {
             if (!string.Equals(item.PreviousAssigneeName, ticket.AssigneeName, StringComparison.OrdinalIgnoreCase))
@@ -234,10 +233,8 @@ public static partial class NotificationFormatter
     private static string NormalizeEmpty(string? value, string fallback) =>
         string.IsNullOrWhiteSpace(value) || value.Trim() == "---" ? fallback : value.Trim();
 
-    private static string FormatVietnamTime(DateTimeOffset value, bool includeSeconds = true) =>
-        value.ToOffset(TimeSpan.FromHours(7)).ToString(includeSeconds ? "dd/MM/yyyy HH:mm:ss" : "dd/MM/yyyy HH:mm",
-            CultureInfo.InvariantCulture) +
-        " (UTC+07:00)";
+    private static string FormatVietnamTime(DateTimeOffset value) =>
+        value.ToOffset(TimeSpan.FromHours(7)).ToString("HH:mm:ss dd/MM/yyyy", CultureInfo.InvariantCulture);
 
     [GeneratedRegex("<[^>]+>")]
     private static partial Regex HtmlTagRegex();

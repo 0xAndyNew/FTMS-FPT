@@ -62,7 +62,7 @@ public partial class CompactSettingsWindow : Window
             var response = await http.PostAsJsonAsync($"https://api.telegram.org/bot{token}/sendMessage", new
             {
                 chat_id = chatId,
-                text = $"FTMS Companion: K\u1ebft n\u1ed1i Telegram th\u00e0nh c\u00f4ng l\u00fac {DateTime.Now:dd/MM/yyyy HH:mm:ss}.",
+                text = $"FTMS Companion: K\u1ebft n\u1ed1i Telegram th\u00e0nh c\u00f4ng l\u00fac {DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)):HH:mm:ss dd/MM/yyyy}.",
                 disable_web_page_preview = true
             });
             if (response.IsSuccessStatusCode)

@@ -645,12 +645,19 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             for (var i = 0; i < criticalList.Count; i++)
             {
                 var evt = criticalList[i];
+                var isResponseTransition = evt.EventType == TicketEventType.StatusChanged &&
+                    evt.PreviousStatus == TicketStatus.Paused &&
+                    evt.CurrentStatus == TicketStatus.InProgress;
                 var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
-                    cancellationToken, evt.LatestEmail, evt.Snapshot.LatestEmail);
+                    cancellationToken, isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
                 if (enriched is not null)
                 {
+                    var previousEmail = previousSnapshots.GetValueOrDefault(evt.TicketCode)?.LatestEmail;
                     criticalList[i] = evt with
                     {
+                        Reason = isResponseTransition && TicketChangeDetector.IsNewEmail(previousEmail, enriched)
+                            ? "FTMS có email mới"
+                            : evt.Reason,
                         LatestEmail = enriched,
                         Snapshot = evt.Snapshot with { LatestEmail = enriched }
                     };
