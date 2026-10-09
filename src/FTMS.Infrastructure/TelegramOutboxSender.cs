@@ -396,42 +396,6 @@ public sealed class TelegramOutboxSender(
         command.Parameters.AddWithValue("$id", id);
         command.Parameters.AddWithValue("$now", DateTimeOffset.Now.ToString("O"));
         await command.ExecuteNonQueryAsync(ct);
-
-        var ticketCommand = connection.CreateCommand();
-        ticketCommand.Transaction = transaction;
-        ticketCommand.CommandText = "SELECT ticket_code FROM ticket_events WHERE event_key=$eventKey";
-        ticketCommand.Parameters.AddWithValue("$eventKey", eventKey);
-        var ticketCode = (string?)await ticketCommand.ExecuteScalarAsync(ct);
-        if (!string.IsNullOrWhiteSpace(ticketCode))
-        {
-            var canCleanup = connection.CreateCommand();
-            canCleanup.Transaction = transaction;
-            canCleanup.CommandText = """
-                SELECT CASE WHEN
-                    EXISTS(SELECT 1 FROM ticket_events WHERE ticket_code=$code AND event_type='Terminal') AND
-                    NOT EXISTS(
-                        SELECT 1 FROM notification_outbox pending
-                        JOIN ticket_events pending_event ON pending_event.event_key=pending.event_key
-                        WHERE pending_event.ticket_code=$code AND pending.sent_at IS NULL
-                    )
-                THEN 1 ELSE 0 END
-                """;
-            canCleanup.Parameters.AddWithValue("$code", ticketCode);
-            if (Convert.ToInt32(await canCleanup.ExecuteScalarAsync(ct)) == 1)
-            {
-                var cleanup = connection.CreateCommand();
-                cleanup.Transaction = transaction;
-                cleanup.CommandText = """
-                    DELETE FROM notification_outbox WHERE event_key IN (
-                        SELECT event_key FROM ticket_events WHERE ticket_code=$code
-                    );
-                    DELETE FROM ticket_events WHERE ticket_code=$code;
-                    DELETE FROM ticket_snapshots WHERE code=$code;
-                    """;
-                cleanup.Parameters.AddWithValue("$code", ticketCode);
-                await cleanup.ExecuteNonQueryAsync(ct);
-            }
-        }
         await transaction.CommitAsync(ct);
     }
 

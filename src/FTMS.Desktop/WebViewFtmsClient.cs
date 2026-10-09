@@ -266,11 +266,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   slaType: numberOf(pick(row, 'typeSLA','TypeSLA','typeSla','slaType','SlaType','SLA_TYPE')),
                   latestEmail: (() => {
                     const sender = emailOf(row);
-                    const subject = pick(row, 'emailSubject','EmailSubject');
-                    const content = pick(row, 'emailContent','EmailContent');
-                    const sentAt = dateOf(pick(row, 'emailDate','EmailDate','sendDate','SendDate','sentAt','SentAt'));
+                    const subject = pick(row, 'emailSubject','EmailSubject','title','Title','subject','Subject');
+                    const content = pick(row, 'emailContent','EmailContent','contents','Contents','content','Content','description','Description','requestContent','RequestContent','body','Body','detail','Detail');
+                    const sentAt = dateOf(pick(row, 'emailDate','EmailDate','sendDate','SendDate','sentAt','SentAt','createDate','CreateDate','createdAt','CreatedAt'));
                     if (!sender || !sentAt) return null;
-                    const body = String(content || '').trim() === String(subject || '').trim() ? null : content;
+                    const body = content ? String(content).trim() : null;
                     return { id: String(pick(row, 'emailHistoryId','EmailHistoryId','emailId','EmailId','id','Id') || ''),
                       sentAt, from: sender, subject, body };
                   })()
@@ -1233,8 +1233,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       const fileId = extractFileId(mail);
                       let body = '';
                       if (fileId) body = await readMailFile(fileId);
-                      if (!body) body = mailField('contents', 'content', 'body') || '';
-                      if (String(body).trim() === String(mailField('subject', 'emailsubject', 'title') || '').trim()) body = '';
+                      if (!body) body = mailField('contents', 'content', 'body', 'description', 'requestcontent', 'detail') || '';
                       let sender = [mailField('mailposter', 'posteremail', 'poster', 'senderemail', 'sender',
                         'emailfrom', 'fromemail', 'fromaddress', 'mailfrom', 'from')].map(emailAddress).find(Boolean);
                       if (!sender) {
@@ -1300,7 +1299,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const fileId = extractFileId(row);
                   let body = '';
                   if (fileId) body = await readMailFile(fileId);
-                  if (!body) body = field('CONTENTS', 'CONTENT', 'BODY') || '';
+                  if (!body) body = field('CONTENTS', 'CONTENT', 'BODY', 'DESCRIPTION', 'REQUEST_CONTENT', 'DETAIL') || '';
                   const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME', 'SEND_DATE', 'SENT_AT', 'CREATE_DATE');
                   const parsedSentAt = parseMailDate(rawSentAt);
                   let sentAt = parsedSentAt?.toISOString() || null;

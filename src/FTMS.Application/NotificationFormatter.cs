@@ -97,6 +97,10 @@ public static partial class NotificationFormatter
         }
         var originalTicketTitle = string.IsNullOrWhiteSpace(ticket.Title) ? email?.Subject : ticket.Title;
         var emailBody = CleanEmail(email?.Body);
+        if (string.IsNullOrWhiteSpace(emailBody) && !string.IsNullOrWhiteSpace(email?.Body))
+        {
+            emailBody = email.Body.Trim();
+        }
         var shouldRenderBlockquote = email is not null &&
             (!string.IsNullOrWhiteSpace(emailBody) || !string.IsNullOrWhiteSpace(email.From) || email.SentAt is not null || !string.IsNullOrWhiteSpace(originalTicketTitle));
         if (shouldRenderBlockquote)
@@ -125,11 +129,17 @@ public static partial class NotificationFormatter
         value = WebUtility.HtmlDecode(HtmlTagRegex().Replace(value, " "));
         value = LineWhitespaceRegex().Replace(value, " ");
         value = MultiLineRegex().Replace(value, "\n").Trim();
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+        var fallbackClean = value;
 
         // 1. Cut quoted email thread / original message headers
         var quotedHeader = QuotedHeaderRegex().Match(value);
         if (quotedHeader.Success && quotedHeader.Index > 20)
-            value = value[..quotedHeader.Index].Trim();
+        {
+            var candidate = value[..quotedHeader.Index].Trim();
+            if (candidate.Length >= 15) value = candidate;
+        }
 
         // 2. Cut standard confidentiality notices and separator lines
         foreach (var marker in new[]
@@ -139,7 +149,11 @@ public static partial class NotificationFormatter
         })
         {
             var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (index >= 0) value = value[..index].Trim();
+            if (index >= 0)
+            {
+                var candidate = value[..index].Trim();
+                if (candidate.Length >= 15) value = candidate;
+            }
         }
 
         // 3. Cut mobile signatures and original message markers
@@ -150,7 +164,11 @@ public static partial class NotificationFormatter
         })
         {
             var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (index > 20) value = value[..index].Trim();
+            if (index > 20)
+            {
+                var candidate = value[..index].Trim();
+                if (candidate.Length >= 15) value = candidate;
+            }
         }
 
         // 4. Cut closing signatures intelligently:
@@ -161,7 +179,7 @@ public static partial class NotificationFormatter
         {
             // Verify there is substantial content before the closing phrase
             var beforeClosing = value[..closingMatch.Index].Trim();
-            if (beforeClosing.Length >= 10)
+            if (beforeClosing.Length >= 15)
             {
                 value = beforeClosing;
             }
@@ -180,8 +198,15 @@ public static partial class NotificationFormatter
             var previousLine = value.LastIndexOf('\n', index - 1);
             var signatureStart = previousLine > 0 ? value.LastIndexOf('\n', previousLine - 1) : -1;
             if (signatureStart < 0) signatureStart = previousLine >= 0 ? previousLine + 1 : index;
-            value = value[..signatureStart].Trim();
+            if (signatureStart > 0)
+            {
+                var candidate = value[..signatureStart].Trim();
+                if (candidate.Length >= 15) value = candidate;
+            }
         }
+
+        if (string.IsNullOrWhiteSpace(value) && !string.IsNullOrWhiteSpace(fallbackClean))
+            value = fallbackClean;
 
         // Telegram limit is 4096 chars per message; allow up to 3500 chars for body alone
         if (value.Length > 3500)

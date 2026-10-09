@@ -1019,6 +1019,41 @@ public sealed class NotificationFormatterEmailTests
         Assert.DoesNotContain("Thời gian thay đổi", message);
     }
 
+    [Fact]
+    public void CleanEmail_ShortEmailWithSignatureMarker_PreservesContentAndNeverEmpties()
+    {
+        var raw = "Nhờ TOC hỗ trợ reset cổng\nFPT Telecom International\nHotline: 19006973";
+        var cleaned = NotificationFormatter.CleanEmail(raw);
+
+        Assert.False(string.IsNullOrWhiteSpace(cleaned));
+        Assert.Contains("Nhờ TOC hỗ trợ reset cổng", cleaned);
+    }
+
+    [Fact]
+    public void NotificationFormatter_WhenEmailBodyExists_AlwaysRendersBodyInsideBlockquote()
+    {
+        var email = new LatestEmail("300", DateTimeOffset.UtcNow, "vinhnt93@fpt.com",
+            "[Miền Bắc]-[HNID49102]-[Rack]-[Truy cập dc]", "Nhờ TOC hỗ trợ vào DC kiểm tra rack");
+        var snapshot = Snapshot("RQ202610090178", TicketStatus.New, email, DateTimeOffset.UtcNow);
+        var evt = new TicketEvent
+        {
+            EventKey = "rq-email-body-test",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.Created,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = DateTimeOffset.UtcNow,
+            Reason = "Phát hiện ticket mới",
+            LatestEmail = email,
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains("From: vinhnt93@fpt.com", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode("Nhờ TOC hỗ trợ vào DC kiểm tra rack"), message);
+    }
+
     private static LatestEmail Email(string id, DateTimeOffset sentAt, string body) =>
         new(id, sentAt, "sender@fpt.com", "Tiêu đề kiểm thử", body);
 
