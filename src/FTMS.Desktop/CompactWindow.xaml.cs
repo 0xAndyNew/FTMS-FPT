@@ -39,7 +39,6 @@ public partial class CompactWindow : Window
     private bool _monitorStarted;
     private bool _isListPage;
     private bool _settingsOpen;
-    private bool _refreshInProgress;
     private bool _visibleNavigationInProgress;
     private bool _manualLoginNotificationShown;
     private bool _checkingTelegram;
@@ -158,9 +157,6 @@ public partial class CompactWindow : Window
         MonitorWebView.NavigationCompleted += OnMonitorNavigationCompleted;
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStatusMutationScript.Value);
-        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStickyPagerScript.Value);
-        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
-        await MonitorWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
         _displayLoginRecovery = new WebViewLoginRecovery(FtmsWebView, new Uri(FtmsReactUrl));
         _displayLoginRecovery.StatusChanged += OnLoginRecoveryStatusChanged;
         _ftmsClient = new WebViewFtmsClient(MonitorWebView, FtmsLegacyUrl);
@@ -387,7 +383,6 @@ public partial class CompactWindow : Window
     private async void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
     {
         _visibleNavigationInProgress = false;
-        _refreshInProgress = false;
         if (_lifetime.IsCancellationRequested || _displayLoginRecovery is null) return;
         if (!e.IsSuccess)
         {
@@ -568,8 +563,25 @@ public partial class CompactWindow : Window
         }
         finally { _settingsOpen = false; MarkUserActivity(); }
     }
-    private void OpenFtms(object sender, RoutedEventArgs e) => FtmsWebView.Source = new Uri(FtmsReactUrl);
-    private async void ReloadFtms(object sender, RoutedEventArgs e)
+    private void OpenFtms(object sender, RoutedEventArgs e)
+    {
+        MarkUserActivity();
+        if (FtmsWebView.CoreWebView2 is null) return;
+        var uri = FtmsWebView.Source;
+        if (uri is not null && string.Equals(uri.GetLeftPart(UriPartial.Path).TrimEnd('/'),
+                new Uri(FtmsReactUrl).GetLeftPart(UriPartial.Path).TrimEnd('/'),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            MonitorText.Text = $"Tải lại Danh sách hỗ trợ lúc {DateTime.Now:HH:mm:ss}";
+            FtmsWebView.Reload();
+        }
+        else
+        {
+            MonitorText.Text = $"Quay về Danh sách hỗ trợ lúc {DateTime.Now:HH:mm:ss}";
+            FtmsWebView.Source = new Uri(FtmsReactUrl);
+        }
+    }
+    private void ReloadFtms(object sender, RoutedEventArgs e)
     {
         MarkUserActivity();
         var monitor = _monitor;
@@ -577,8 +589,9 @@ public partial class CompactWindow : Window
         if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
             _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
 
-        if (FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
-        await RefreshTicketGridAsync(fallbackToReload: true);
+        if (FtmsWebView.CoreWebView2 is null) return;
+        MonitorText.Text = $"Tải lại trang hiện tại lúc {DateTime.Now:HH:mm:ss}";
+        FtmsWebView.Reload();
     }
     private void OnUserActivity(object sender, InputEventArgs e) => MarkUserActivity();
     private void MarkUserActivity() => _lastUserActivity = DateTimeOffset.UtcNow;
@@ -608,75 +621,29 @@ public partial class CompactWindow : Window
 
     private async void RunAutoRefresh()
     {
-        if (!IsVisible || IsUserBusy() || FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
-        await RefreshTicketGridAsync(fallbackToReload: false);
-    }
-
-    private async Task RefreshTicketGridAsync(bool fallbackToReload = false)
-    {
-        if (FtmsWebView.CoreWebView2 is null || !_isListPage || _refreshInProgress) return;
-        _refreshInProgress = true;
+        if (!IsVisible || IsUserBusy() || FtmsWebView.CoreWebView2 is null) return;
         const string script = """
             (() => {
               if (location.hostname.toLowerCase() !== 'ftms.fpt.net') return 'invalid-host';
-
-              // 0. Tự động đóng modal popup tìm kiếm nếu đang bị mở
-              const closeSearchModal = document.querySelector('button[title*="đóng" i], button[aria-label*="đóng" i]')
-                || Array.from(document.querySelectorAll('button')).find(b => {
-                     const text = (b.innerText || b.textContent || '').trim().toLowerCase();
-                     return text === 'đóng tìm kiếm' || text === 'đóng';
-                   })
-                || document.querySelector('.ant-modal-close, button.ant-modal-close, button.top-8.right-8');
-              if (closeSearchModal && closeSearchModal.offsetParent !== null) {
-                closeSearchModal.click();
-              } else if (document.body.innerText.includes('Nhấn ESC để đóng')) {
-                window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
-              }
-
               if (Date.now() - (window.__ftmsCompanionLastInputAt || 0) < 15000) return 'busy';
 
-              // 1. Kendo pager refresh button (trên trang /ihub/list legacy)
+              // 1. Kendo Grid refresh (trên trang /ihub/list)
               const kendoRefresh = document.querySelector('a.k-pager-refresh.k-link');
               if (kendoRefresh && kendoRefresh.offsetParent !== null) {
                 kendoRefresh.click();
                 return 'kendo-btn';
               }
-
-              // 2. Kendo Grid dataSource.read() trực tiếp
               const kendoGrid = globalThis.jQuery?.('#list-grid').data('kendoGrid');
               if (kendoGrid?.dataSource) {
                 kendoGrid.dataSource.read();
                 return 'kendo-ds';
               }
 
-              // 3. React list refresh qua tab đang kích hoạt (Ca vụ/YCHT)
-              const activeTab = document.querySelector('.ant-tabs-nav .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn');
-              if (activeTab && activeTab.offsetParent !== null) {
-                activeTab.click();
-                return 'react-tab';
-              }
-
-              // 4. React list refresh qua nút Tìm kiếm gắn liền với ô nhập liệu (loại trừ nút Mở tìm kiếm ở header)
-              const listSearchBtn = document.querySelector('input[placeholder*="Tìm kiếm" i] + button, input[placeholder*="Tìm kiếm" i] ~ button')
-                || document.querySelector('button.absolute.right-1');
+              // 2. React Ca vụ/YCHT refresh (trên trang /ihub/react/list)
+              const listSearchBtn = document.querySelector('button.absolute.right-1, input[placeholder*="Tìm kiếm" i] ~ button, input[placeholder*="Tìm kiếm" i] + button');
               if (listSearchBtn && listSearchBtn.offsetParent !== null) {
                 listSearchBtn.click();
                 return 'react-search-btn';
-              }
-
-              // 5. Nút làm mới chuyên dụng nếu có (không chọn nút ở header)
-              const contentArea = document.querySelector('.app-main, #kt_app_content, .ant-layout-content, body');
-              const buttons = Array.from((contentArea || document).querySelectorAll('button, a'));
-              const refreshBtn = buttons.find(b => {
-                if (b.offsetParent === null) return false;
-                if (b.closest('.app-header, #kt_app_header, header')) return false;
-                const text = (b.getAttribute('title') || b.getAttribute('aria-label') || b.innerText || '').trim().toLowerCase();
-                return text.includes('làm mới') || text.includes('tải lại') || text.includes('refresh');
-              });
-
-              if (refreshBtn) {
-                refreshBtn.click();
-                return 'react-btn';
               }
 
               return 'none';
@@ -686,23 +653,14 @@ public partial class CompactWindow : Window
         {
             var raw = await FtmsWebView.ExecuteScriptAsync(script);
             var result = raw?.Trim('"');
-            if (result is "kendo-btn" or "kendo-ds" or "react-btn" or "react-search-btn" or "react-tab")
+            if (result is "kendo-btn" or "kendo-ds" or "react-search-btn")
             {
-                MonitorText.Text = $"Tự động làm mới danh sách lúc {DateTime.Now:HH:mm:ss}";
-            }
-            else if (fallbackToReload && result == "none")
-            {
-                MonitorText.Text = $"Tải lại trang FTMS lúc {DateTime.Now:HH:mm:ss}";
-                FtmsWebView.Reload();
+                MonitorText.Text = $"Tự động làm mới dữ liệu Ca vụ/YCHT lúc {DateTime.Now:HH:mm:ss}";
             }
         }
         catch (Exception ex)
         {
-            MonitorText.Text = $"Không thể làm mới danh sách: {ex.Message}";
-        }
-        finally
-        {
-            _refreshInProgress = false;
+            MonitorText.Text = $"Không thể tự động làm mới: {ex.Message}";
         }
     }
 

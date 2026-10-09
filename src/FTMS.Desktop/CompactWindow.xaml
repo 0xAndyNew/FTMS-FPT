@@ -14,8 +14,8 @@
         <Border Background="#FBFBFD" BorderBrush="#E1E1E5" BorderThickness="0,0,0,1">
             <Grid Margin="14,0"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Style="{StaticResource IconButton}" ToolTip="Trang FTMS" Click="OpenFtms"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE80F;" FontSize="16" Foreground="#1D1D1F"/></Button>
-                    <Button Style="{StaticResource IconButton}" ToolTip="Tải lại danh sách" Click="ReloadFtms"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE72C;" FontSize="16" Foreground="#1D1D1F"/></Button>
+                    <Button Style="{StaticResource IconButton}" ToolTip="Trang chính (Danh sách hỗ trợ)" Click="OpenFtms"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE80F;" FontSize="16" Foreground="#1D1D1F"/></Button>
+                    <Button Style="{StaticResource IconButton}" ToolTip="Làm mới trang hiện tại (F5)" Click="ReloadFtms"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE72C;" FontSize="16" Foreground="#1D1D1F"/></Button>
                     <Button Style="{StaticResource IconButton}" ToolTip="Cài đặt" Click="OpenSettings"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE713;" FontSize="16" Foreground="#1D1D1F"/></Button>
                     <Border Margin="8,0,0,0" Padding="10,6" Background="#EEF4F0" CornerRadius="6"><StackPanel Orientation="Horizontal"><Ellipse x:Name="StatusDot" Width="7" Height="7" Fill="#D9A441" Margin="0,0,7,0"/><TextBlock x:Name="SessionText" Text="Đang kết nối" FontSize="11" Foreground="#53605B"/></StackPanel></Border>
                 </StackPanel>
