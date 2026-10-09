@@ -16,7 +16,7 @@ namespace FTMS.Desktop;
 
 public partial class CompactWindow : Window
 {
-    private const string FtmsReactUrl = "https://ftms.fpt.net/ihub/react/list";
+    private const string FtmsReactUrl = "https://ftms.fpt.net/ihub/react/list?referrer=menu";
     private const string FtmsLegacyUrl = "https://ftms.fpt.net/ihub/list?tab=2";
     private readonly SettingsStore _settingsStore = new();
     private readonly CancellationTokenSource _lifetime = new();
@@ -409,7 +409,7 @@ public partial class CompactWindow : Window
                         or LoginRecoveryState.WaitingForUser;
                 _wasLoggingIn = false;
 
-                if (wasLoggingIn && !string.Equals(uri.AbsolutePath.TrimEnd('/'), "/ihub/react/list", StringComparison.OrdinalIgnoreCase))
+                if (wasLoggingIn && (!string.Equals(uri.AbsolutePath.TrimEnd('/'), "/ihub/react/list", StringComparison.OrdinalIgnoreCase) || !uri.Query.Contains("referrer=menu", StringComparison.OrdinalIgnoreCase)))
                 {
                     FtmsWebView.Source = new Uri(FtmsReactUrl);
                     return;
@@ -619,9 +619,23 @@ public partial class CompactWindow : Window
         const string script = """
             (() => {
               if (location.hostname.toLowerCase() !== 'ftms.fpt.net') return 'invalid-host';
+
+              // 0. Tự động đóng modal popup tìm kiếm nếu đang bị mở
+              const closeSearchModal = document.querySelector('button[title*="đóng" i], button[aria-label*="đóng" i]')
+                || Array.from(document.querySelectorAll('button')).find(b => {
+                     const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                     return text === 'đóng tìm kiếm' || text === 'đóng';
+                   })
+                || document.querySelector('.ant-modal-close, button.ant-modal-close, button.top-8.right-8');
+              if (closeSearchModal && closeSearchModal.offsetParent !== null) {
+                closeSearchModal.click();
+              } else if (document.body.innerText.includes('Nhấn ESC để đóng')) {
+                window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true }));
+              }
+
               if (Date.now() - (window.__ftmsCompanionLastInputAt || 0) < 15000) return 'busy';
 
-              // 1. Kendo pager refresh button (trên trang /ihub/list)
+              // 1. Kendo pager refresh button (trên trang /ihub/list legacy)
               const kendoRefresh = document.querySelector('a.k-pager-refresh.k-link');
               if (kendoRefresh && kendoRefresh.offsetParent !== null) {
                 kendoRefresh.click();
@@ -635,21 +649,30 @@ public partial class CompactWindow : Window
                 return 'kendo-ds';
               }
 
-              // 3. React list refresh qua nút Tìm kiếm (trên trang /ihub/react/list)
-              const searchBtn = document.querySelector('button .anticon-search, .anticon-search')?.closest('button')
-                || document.querySelector('input[placeholder*="Tìm kiếm" i] ~ button, input[placeholder*="Tìm kiếm" i] + button');
-              if (searchBtn && searchBtn.offsetParent !== null) {
-                searchBtn.click();
+              // 3. React list refresh qua tab đang kích hoạt (Ca vụ/YCHT)
+              const activeTab = document.querySelector('.ant-tabs-nav .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn');
+              if (activeTab && activeTab.offsetParent !== null) {
+                activeTab.click();
+                return 'react-tab';
+              }
+
+              // 4. React list refresh qua nút Tìm kiếm gắn liền với ô nhập liệu (loại trừ nút Mở tìm kiếm ở header)
+              const listSearchBtn = document.querySelector('input[placeholder*="Tìm kiếm" i] + button, input[placeholder*="Tìm kiếm" i] ~ button')
+                || document.querySelector('button.absolute.right-1');
+              if (listSearchBtn && listSearchBtn.offsetParent !== null) {
+                listSearchBtn.click();
                 return 'react-search-btn';
               }
 
-              // 4. React list refresh qua nút bấm làm mới nếu có
-              const buttons = Array.from(document.querySelectorAll('button, a, span[role="button"], div[role="button"]'));
+              // 5. Nút làm mới chuyên dụng nếu có (không chọn nút ở header)
+              const contentArea = document.querySelector('.app-main, #kt_app_content, .ant-layout-content, body');
+              const buttons = Array.from((contentArea || document).querySelectorAll('button, a'));
               const refreshBtn = buttons.find(b => {
                 if (b.offsetParent === null) return false;
+                if (b.closest('.app-header, #kt_app_header, header')) return false;
                 const text = (b.getAttribute('title') || b.getAttribute('aria-label') || b.innerText || '').trim().toLowerCase();
                 return text.includes('làm mới') || text.includes('tải lại') || text.includes('refresh');
-              }) || document.querySelector('.ant-btn-reload, .btn-refresh, [data-icon="reload"], [data-icon="sync"]')?.closest('button, a');
+              });
 
               if (refreshBtn) {
                 refreshBtn.click();
@@ -663,7 +686,7 @@ public partial class CompactWindow : Window
         {
             var raw = await FtmsWebView.ExecuteScriptAsync(script);
             var result = raw?.Trim('"');
-            if (result is "kendo-btn" or "kendo-ds" or "react-btn" or "react-search-btn")
+            if (result is "kendo-btn" or "kendo-ds" or "react-btn" or "react-search-btn" or "react-tab")
             {
                 MonitorText.Text = $"Tự động làm mới danh sách lúc {DateTime.Now:HH:mm:ss}";
             }
