@@ -1050,6 +1050,43 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
+    public void NotificationFormatter_AssignmentIdWithoutName_UsesClaimTitle()
+    {
+        var changeAt = new DateTimeOffset(2026, 10, 9, 15, 20, 2, TimeSpan.FromHours(7));
+        var snapshot = new TicketSnapshot
+        {
+            Code = "RQ202610090244",
+            Status = TicketStatus.Assigned,
+            AssigneeId = 2962,
+            AssigneeName = null,
+            DepartmentId = 86016,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center"
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "claim-id-before-name",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.AssignmentChanged,
+            PreviousStatus = TicketStatus.Assigned,
+            CurrentStatus = TicketStatus.Assigned,
+            PreviousAssigneeId = null,
+            PreviousAssigneeName = null,
+            PreviousDepartmentId = 86016,
+            PreviousDepartmentName = snapshot.DepartmentName,
+            DetectedAt = changeAt,
+            ChangedAt = changeAt,
+            Reason = "Người xử lý hoặc phòng ban đã thay đổi",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("TICKET ĐÃ CÓ NGƯỜI NHẬN", message);
+        Assert.DoesNotContain("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+        Assert.DoesNotContain("🏢 <b>Phòng ban:</b>", message);
+    }
+
+    [Fact]
     public void NotificationFormatter_Terminal_ClosedTicket_IncludesChangeTime()
     {
         var closedAt = new DateTimeOffset(2026, 10, 8, 9, 30, 0, TimeSpan.FromHours(7));

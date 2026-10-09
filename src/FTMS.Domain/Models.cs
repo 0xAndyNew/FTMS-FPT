@@ -109,7 +109,9 @@ public sealed record TicketEvent
     public required string Reason { get; init; }
     public string? ChangedBy { get; init; }
     public DateTimeOffset? ChangedAt { get; init; }
+    public long? PreviousAssigneeId { get; init; }
     public string? PreviousAssigneeName { get; init; }
+    public long? PreviousDepartmentId { get; init; }
     public string? PreviousDepartmentName { get; init; }
     public LatestEmail? LatestEmail { get; init; }
     public string? Note { get; init; }

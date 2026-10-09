@@ -15,18 +15,7 @@ public sealed class TicketChangeDetector
         foreach (var snapshot in current)
         {
             previous.TryGetValue(snapshot.Code, out var old);
-            var preservedEmail = SelectEmail(snapshot.LatestEmail, old?.LatestEmail);
-            var effectiveSnapshot = snapshot with
-            {
-                LatestEmail = preservedEmail,
-                AssigneeId = (snapshot.AssigneeId is not null and not 0) ? snapshot.AssigneeId : old?.AssigneeId,
-                AssigneeName = (!string.IsNullOrWhiteSpace(snapshot.AssigneeName) && snapshot.AssigneeName.Trim() != "---" && snapshot.AssigneeName.Trim() != "Chưa nhận")
-                    ? snapshot.AssigneeName : old?.AssigneeName,
-                CreatedAt = old?.CreatedAt ?? snapshot.CreatedAt,
-                DepartmentId = snapshot.DepartmentId ?? old?.DepartmentId,
-                DepartmentName = !string.IsNullOrWhiteSpace(snapshot.DepartmentName) ? snapshot.DepartmentName : old?.DepartmentName,
-                Title = !string.IsNullOrWhiteSpace(old?.Title) ? old.Title : snapshot.Title
-            };
+            var effectiveSnapshot = PreserveKnownValues(snapshot, old);
 
             if (old is null)
             {
@@ -38,26 +27,27 @@ public sealed class TicketChangeDetector
                 continue;
             }
 
-            var statusChanged = old.Status != snapshot.Status;
-            var assignmentChanged = old.AssigneeId != snapshot.AssigneeId ||
-                old.DepartmentId != snapshot.DepartmentId;
-            var changedAt = snapshot.UpdatedAt ?? DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+            var statusChanged = old.Status != effectiveSnapshot.Status;
+            var assignmentChanged = old.AssigneeId != effectiveSnapshot.AssigneeId ||
+                old.DepartmentId != effectiveSnapshot.DepartmentId;
+            var changedAt = effectiveSnapshot.UpdatedAt ?? DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
 
-            if (statusChanged && snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
+            if (statusChanged && effectiveSnapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
             {
                 events.Add(Create(effectiveSnapshot with { IsTerminal = true },
                     TicketEventType.Terminal, old.Status, "Trạng thái ticket đã thay đổi", effectiveSnapshot.LatestEmail,
-                    changedAt.ToString("O"), snapshot.UpdatedBy, changedAt));
+                    changedAt.ToString("O"), effectiveSnapshot.UpdatedBy, changedAt));
                 continue;
             }
 
-            if (assignmentChanged && !snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
+            if (assignmentChanged && !effectiveSnapshot.Status.IsTerminal(settings.UnprocessedIsTerminal))
             {
-                var discriminator = $"{old.AssigneeId}>{snapshot.AssigneeId}|" +
-                    $"{old.DepartmentId}>{snapshot.DepartmentId}|{old.Status}>{snapshot.Status}|{changedAt:O}";
+                var discriminator = $"{old.AssigneeId}>{effectiveSnapshot.AssigneeId}|" +
+                    $"{old.DepartmentId}>{effectiveSnapshot.DepartmentId}|{old.Status}>{effectiveSnapshot.Status}|{changedAt:O}";
                 events.Add(Create(effectiveSnapshot, TicketEventType.AssignmentChanged,
                     old.Status, "Người xử lý hoặc phòng ban đã thay đổi", effectiveSnapshot.LatestEmail, discriminator,
-                    snapshot.UpdatedBy, changedAt, old.AssigneeName, old.DepartmentName));
+                    effectiveSnapshot.UpdatedBy, changedAt, old.AssigneeId, old.AssigneeName,
+                    old.DepartmentId, old.DepartmentName));
                 continue;
             }
 
@@ -65,7 +55,7 @@ public sealed class TicketChangeDetector
             {
                 events.Add(Create(effectiveSnapshot, TicketEventType.StatusChanged,
                     old.Status, "Trạng thái ticket đã thay đổi", effectiveSnapshot.LatestEmail, changedAt.ToString("O"),
-                    snapshot.UpdatedBy, changedAt));
+                    effectiveSnapshot.UpdatedBy, changedAt));
             }
         }
         return events;
@@ -407,9 +397,29 @@ public sealed class TicketChangeDetector
         return fullMatchForNewest ?? newest;
     }
 
+    internal static TicketSnapshot PreserveKnownValues(TicketSnapshot snapshot, TicketSnapshot? previous) =>
+        snapshot with
+        {
+            LatestEmail = SelectEmail(snapshot.LatestEmail, previous?.LatestEmail),
+            AssigneeId = snapshot.AssigneeId is not null and not 0
+                ? snapshot.AssigneeId : previous?.AssigneeId,
+            AssigneeName = HasAssignedName(snapshot.AssigneeName)
+                ? snapshot.AssigneeName : previous?.AssigneeName,
+            CreatedAt = previous?.CreatedAt ?? snapshot.CreatedAt,
+            DepartmentId = snapshot.DepartmentId ?? previous?.DepartmentId,
+            DepartmentName = !string.IsNullOrWhiteSpace(snapshot.DepartmentName)
+                ? snapshot.DepartmentName : previous?.DepartmentName,
+            Title = !string.IsNullOrWhiteSpace(previous?.Title) ? previous.Title : snapshot.Title
+        };
+
+    private static bool HasAssignedName(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Trim() != "---" &&
+        !value.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
+
     private static TicketEvent Create(TicketSnapshot snapshot, TicketEventType type, TicketStatus? previous,
         string reason, LatestEmail? email, string discriminator = "", string? changedBy = null, DateTimeOffset? changedAt = null,
-        string? previousAssigneeName = null, string? previousDepartmentName = null, string? note = null)
+        long? previousAssigneeId = null, string? previousAssigneeName = null,
+        long? previousDepartmentId = null, string? previousDepartmentName = null, string? note = null)
     {
         var emailIdentity = type == TicketEventType.EmailReceived
             ? email?.Id ?? email?.SentAt?.ToString("O")
@@ -424,8 +434,10 @@ public sealed class TicketChangeDetector
             EventKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))),
             TicketCode = snapshot.Code, EventType = type, PreviousStatus = previous,
             CurrentStatus = snapshot.Status, DetectedAt = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)), Reason = reason,
-            ChangedBy = changedBy, ChangedAt = changedAt, PreviousAssigneeName = previousAssigneeName,
-            PreviousDepartmentName = previousDepartmentName, LatestEmail = email, Note = note, Snapshot = snapshot
+            ChangedBy = changedBy, ChangedAt = changedAt,
+            PreviousAssigneeId = previousAssigneeId, PreviousAssigneeName = previousAssigneeName,
+            PreviousDepartmentId = previousDepartmentId, PreviousDepartmentName = previousDepartmentName,
+            LatestEmail = email, Note = note, Snapshot = snapshot
         };
     }
 }

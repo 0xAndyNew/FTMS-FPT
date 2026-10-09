@@ -496,6 +496,136 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task Poll_ClaimWithDelayedMetadata_EmitsOneRecipientNotification()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var unassigned = new TicketSnapshot
+        {
+            Code = "RQ202610090244",
+            Status = TicketStatus.Assigned,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = null,
+            AssigneeName = null
+        };
+        var assignedWithoutMetadata = unassigned with
+        {
+            AssigneeId = 2962,
+            DepartmentId = null,
+            DepartmentName = null
+        };
+        var assignedWithNameAndPause = unassigned with
+        {
+            Status = TicketStatus.Paused,
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2"
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, departmentName), [unassigned]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        client.CurrentTickets = [assignedWithoutMetadata];
+        await monitor.SyncNowAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        client.CurrentTickets = [assignedWithNameAndPause];
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var claimEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == unassigned.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(2962, claimEvent.Snapshot.AssigneeId);
+        Assert.Equal("HieuDX2", claimEvent.Snapshot.AssigneeName);
+        Assert.Equal(86016, claimEvent.Snapshot.DepartmentId);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CÓ NGƯỜI NHẬN", message);
+        Assert.Contains("Chưa nhận ➔ HieuDX2", message);
+        Assert.DoesNotContain("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+        Assert.DoesNotContain("🏢 <b>Phòng ban:</b>", message);
+        Assert.DoesNotContain(store.SavedEvents, item =>
+            item.TicketCode == unassigned.Code && item.EventType == TicketEventType.StatusChanged);
+    }
+
+    [Fact]
+    public async Task Poll_GenuineDepartmentChange_StillEmitsDepartmentNotification()
+    {
+        var tocDepartment = "TOC - Phòng Dịch vụ Data Center";
+        var previous = new TicketSnapshot
+        {
+            Code = "RQ-DEPARTMENT-TRANSFER",
+            Status = TicketStatus.InProgress,
+            DepartmentId = 86017,
+            DepartmentName = "Phòng ban khác",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2"
+        };
+        var transferred = previous with
+        {
+            DepartmentId = 86016,
+            DepartmentName = tocDepartment
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, tocDepartment), [transferred]);
+        var store = new MemoryStore();
+        store.InitialSnapshots[previous.Code] = previous;
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var assignmentEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == previous.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(86017, assignmentEvent.PreviousDepartmentId);
+        Assert.Equal(86016, assignmentEvent.Snapshot.DepartmentId);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+        Assert.Contains("Phòng ban:</b>", message);
+    }
+
+    [Fact]
+    public async Task Poll_GenuineAssigneeTransfer_StillEmitsHandlerNotification()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var previous = new TicketSnapshot
+        {
+            Code = "RQ-ASSIGNEE-TRANSFER",
+            Status = TicketStatus.InProgress,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = 100,
+            AssigneeName = "OldUser"
+        };
+        var transferred = previous with
+        {
+            AssigneeId = 200,
+            AssigneeName = "NewUser"
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, departmentName), [transferred]);
+        var store = new MemoryStore();
+        store.InitialSnapshots[previous.Code] = previous;
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var assignmentEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == previous.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(100, assignmentEvent.PreviousAssigneeId);
+        Assert.Equal(200, assignmentEvent.Snapshot.AssigneeId);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ", message);
+        Assert.DoesNotContain("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+    }
+
+    [Fact]
     public async Task ApplyConfirmedAssignmentMutation_ImmediatelyEnqueuesAssignmentEventAndPreventsRollback()
     {
         var ticket = new TicketSnapshot
@@ -531,6 +661,51 @@ public sealed class TicketMonitorTests
 
         // Must NOT roll back
         Assert.Single(store.SavedEvents, e => e.TicketCode == ticket.Code && e.EventType == TicketEventType.AssignmentChanged);
+    }
+
+    [Fact]
+    public async Task ApplyConfirmedAssignmentMutation_TelegramClaimCoalescesAutomaticPause()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var ticket = new TicketSnapshot
+        {
+            Code = "RQ-MUT-TELEGRAM-CLAIM",
+            Status = TicketStatus.Assigned,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+        var paused = ticket with
+        {
+            Status = TicketStatus.Paused,
+            AssigneeId = 42,
+            AssigneeName = "duy.user"
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(42, "duy.user", 86016, departmentName), [ticket]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        await monitor.ApplyConfirmedAssignmentMutationAsync(ticket.Code, 42,
+            null, null, null, CancellationToken.None);
+        client.CurrentTickets = [paused];
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var claimEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == ticket.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal("duy.user", claimEvent.Snapshot.AssigneeName);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CÓ NGƯỜI NHẬN", message);
+        Assert.DoesNotContain("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+        Assert.DoesNotContain(store.SavedEvents, item =>
+            item.TicketCode == ticket.Code && item.EventType == TicketEventType.StatusChanged);
     }
 
     [Fact]

@@ -81,9 +81,9 @@ public static partial class NotificationFormatter
             text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value)}");
         if (item.EventType == TicketEventType.AssignmentChanged)
         {
-            if (!string.Equals(item.PreviousAssigneeName, ticket.AssigneeName, StringComparison.OrdinalIgnoreCase))
+            if (AssigneeChanged(item))
                 text.AppendLine($"👥 <b>Người xử lý:</b> {Escape(NormalizeEmpty(item.PreviousAssigneeName, "Chưa nhận"))} ➔ {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
-            if (!string.Equals(item.PreviousDepartmentName, ticket.DepartmentName, StringComparison.OrdinalIgnoreCase))
+            if (DepartmentChanged(item))
                 text.AppendLine($"🏢 <b>Phòng ban:</b> {Escape(NormalizeEmpty(item.PreviousDepartmentName, "Chưa có"))} ➔ {Escape(NormalizeEmpty(ticket.DepartmentName, "Chưa có"))}");
         }
         if (item.EventType == TicketEventType.SlaThresholdReached)
@@ -218,17 +218,28 @@ public static partial class NotificationFormatter
 
     private static string AssignmentTitle(TicketEvent item)
     {
-        var hadAssignee = !string.IsNullOrWhiteSpace(item.PreviousAssigneeName) &&
-            item.PreviousAssigneeName.Trim() != "---" &&
-            !item.PreviousAssigneeName.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
-        var hasAssignee = !string.IsNullOrWhiteSpace(item.Snapshot.AssigneeName) &&
-            item.Snapshot.AssigneeName.Trim() != "---" &&
-            !item.Snapshot.AssigneeName.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
+        var hadAssignee = item.PreviousAssigneeId is not null and not 0 || HasAssigneeName(item.PreviousAssigneeName);
+        var hasAssignee = item.Snapshot.AssigneeId is not null and not 0 || HasAssigneeName(item.Snapshot.AssigneeName);
         if (!hadAssignee && hasAssignee) return "🙋 <b>🟢 TICKET ĐÃ CÓ NGƯỜI NHẬN</b>";
-        if (!string.Equals(item.PreviousAssigneeName, item.Snapshot.AssigneeName, StringComparison.OrdinalIgnoreCase))
-            return "👥 <b>🔵 TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ</b>";
+        if (AssigneeChanged(item)) return "👥 <b>🔵 TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ</b>";
         return "🏢 <b>🔵 TICKET ĐÃ CHUYỂN PHÒNG BAN</b>";
     }
+
+    private static bool AssigneeChanged(TicketEvent item) =>
+        item.PreviousAssigneeId is not null || item.Snapshot.AssigneeId is not null
+            ? item.PreviousAssigneeId != item.Snapshot.AssigneeId
+            : !string.Equals(item.PreviousAssigneeName, item.Snapshot.AssigneeName,
+                StringComparison.OrdinalIgnoreCase);
+
+    private static bool DepartmentChanged(TicketEvent item) =>
+        item.PreviousDepartmentId is not null || item.Snapshot.DepartmentId is not null
+            ? item.PreviousDepartmentId != item.Snapshot.DepartmentId
+            : !string.Equals(item.PreviousDepartmentName, item.Snapshot.DepartmentName,
+                StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasAssigneeName(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Trim() != "---" &&
+        !value.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeEmpty(string? value, string fallback) =>
         string.IsNullOrWhiteSpace(value) || value.Trim() == "---" ? fallback : value.Trim();
