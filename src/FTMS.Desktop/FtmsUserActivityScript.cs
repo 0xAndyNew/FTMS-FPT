@@ -16,7 +16,7 @@ internal static class FtmsUserActivityScript
           };
           for (const eventName of ['pointerdown', 'keydown', 'input', 'touchstart'])
             document.addEventListener(eventName, () => report(true), { capture: true, passive: true });
-          for (const eventName of ['pointermove', 'wheel', 'scroll'])
+          for (const eventName of ['wheel', 'scroll'])
             document.addEventListener(eventName, () => report(false), { capture: true, passive: true });
           window.addEventListener('focus', () => report(true));
         })();

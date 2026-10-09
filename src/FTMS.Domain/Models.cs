@@ -118,7 +118,7 @@ public sealed record TicketEvent
 
 public sealed record AppSettings
 {
-    public string FtmsUrl { get; init; } = "https://ftms.fpt.net/ihub/list?tab=2";
+    public string FtmsUrl { get; init; } = "https://ftms.fpt.net/ihub/react/list";
     public int PollIntervalSeconds { get; init; } = 30;
     public int IdleDelaySeconds { get; init; } = 10;
     public bool AutoRefreshEnabled { get; init; } = true;

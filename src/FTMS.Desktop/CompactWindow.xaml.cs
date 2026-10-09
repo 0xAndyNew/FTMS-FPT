@@ -16,7 +16,7 @@ namespace FTMS.Desktop;
 
 public partial class CompactWindow : Window
 {
-    private const string FtmsUrl = "https://ftms.fpt.net/ihub/list?tab=2";
+    private const string FtmsUrl = "https://ftms.fpt.net/ihub/react/list";
     private readonly SettingsStore _settingsStore = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _refreshTimer = new();
@@ -42,6 +42,7 @@ public partial class CompactWindow : Window
     private bool _visibleNavigationInProgress;
     private bool _manualLoginNotificationShown;
     private bool _checkingTelegram;
+    private bool _wasLoggingIn;
     private Task _statusMutationSync = Task.CompletedTask;
     private DateTimeOffset _lastUserActivity = DateTimeOffset.MinValue;
     private System.Windows.Forms.NotifyIcon? _trayIcon;
@@ -376,6 +377,18 @@ public partial class CompactWindow : Window
 
             if (WebViewLoginRecovery.IsFtmsIhubUri(uri))
             {
+                var wasLoggingIn = _wasLoggingIn ||
+                    _displayLoginRecovery.State is LoginRecoveryState.FindingLoginMethod
+                        or LoginRecoveryState.FollowingSso
+                        or LoginRecoveryState.WaitingForUser;
+                _wasLoggingIn = false;
+
+                if (wasLoggingIn && !string.Equals(uri.AbsolutePath.TrimEnd('/'), "/ihub/react/list", StringComparison.OrdinalIgnoreCase))
+                {
+                    FtmsWebView.Source = new Uri(FtmsUrl);
+                    return;
+                }
+
                 UpdateCurrentPage();
                 _manualLoginNotificationShown = false;
                 _displayLoginRecovery.NotifyTargetReached();
@@ -417,6 +430,7 @@ public partial class CompactWindow : Window
 
             if (WebViewLoginRecovery.IsLoginUri(uri) || WebViewLoginRecovery.IsAdfsUri(uri))
             {
+                _wasLoggingIn = true;
                 SetSessionStatus("\u0110ang \u0111\u0103ng nh\u1eadp", "#D9A441");
                 await _displayLoginRecovery.BeginAsync(_lifetime.Token);
                 return;
@@ -547,9 +561,17 @@ public partial class CompactWindow : Window
 
     private void UpdateCurrentPage()
     {
-        _isListPage = Uri.TryCreate(FtmsWebView.CoreWebView2?.Source, UriKind.Absolute, out var uri) &&
-            WebViewLoginRecovery.IsFtmsIhubUri(uri) &&
-            string.Equals(uri.AbsolutePath.TrimEnd('/'), "/ihub/list", StringComparison.OrdinalIgnoreCase);
+        if (Uri.TryCreate(FtmsWebView.CoreWebView2?.Source, UriKind.Absolute, out var uri) &&
+            WebViewLoginRecovery.IsFtmsIhubUri(uri))
+        {
+            var path = uri.AbsolutePath.TrimEnd('/');
+            _isListPage = string.Equals(path, "/ihub/react/list", StringComparison.OrdinalIgnoreCase) ||
+                          string.Equals(path, "/ihub/list", StringComparison.OrdinalIgnoreCase);
+        }
+        else
+        {
+            _isListPage = false;
+        }
     }
 
     private void ApplyRefreshSettings()

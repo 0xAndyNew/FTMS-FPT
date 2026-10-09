@@ -13,7 +13,7 @@ namespace FTMS.Desktop;
 
 public partial class ShellWindow : Window
 {
-    private const string FtmsUrl = "https://ftms.fpt.net/ihub/list?tab=2";
+    private const string FtmsUrl = "https://ftms.fpt.net/ihub/react/list";
     private readonly SettingsStore _settingsStore = new();
     private readonly HttpClient _telegramHttp;
     private CancellationTokenSource _lifetime = new();

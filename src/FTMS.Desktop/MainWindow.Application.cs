@@ -11,7 +11,7 @@ namespace FTMS.Desktop;
 
 public partial class MainWindow
 {
-    private const string FtmsUrl = "https://ftms.fpt.net/ihub/list?tab=2";
+    private const string FtmsUrl = "https://ftms.fpt.net/ihub/react/list";
     private CancellationTokenSource? _monitorCancellation;
     private DateTimeOffset _lastUserActivity = DateTimeOffset.MinValue;
 
