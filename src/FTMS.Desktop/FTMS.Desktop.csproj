@@ -23,7 +23,7 @@
     <Product>FTMS Companion</Product>
     <Company>FPT</Company>
     <Description>Ứng dụng theo dõi ticket FTMS và gửi thông báo Telegram.</Description>
-    <Version>1.0.27</Version>
+    <Version>1.0.28</Version>
   </PropertyGroup>
 
   <ItemGroup>

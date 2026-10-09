@@ -16,7 +16,8 @@ namespace FTMS.Desktop;
 
 public partial class CompactWindow : Window
 {
-    private const string FtmsUrl = "https://ftms.fpt.net/ihub/react/list";
+    private const string FtmsReactUrl = "https://ftms.fpt.net/ihub/react/list";
+    private const string FtmsLegacyUrl = "https://ftms.fpt.net/ihub/list?tab=2";
     private readonly SettingsStore _settingsStore = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly DispatcherTimer _refreshTimer = new();
@@ -160,10 +161,10 @@ public partial class CompactWindow : Window
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStickyPagerScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
         await MonitorWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsBotBlockerScript.Value);
-        _displayLoginRecovery = new WebViewLoginRecovery(FtmsWebView, new Uri(FtmsUrl));
+        _displayLoginRecovery = new WebViewLoginRecovery(FtmsWebView, new Uri(FtmsReactUrl));
         _displayLoginRecovery.StatusChanged += OnLoginRecoveryStatusChanged;
-        _ftmsClient = new WebViewFtmsClient(MonitorWebView, FtmsUrl);
-        _visibleIdentityClient = new WebViewFtmsClient(FtmsWebView, FtmsUrl);
+        _ftmsClient = new WebViewFtmsClient(MonitorWebView, FtmsLegacyUrl);
+        _visibleIdentityClient = new WebViewFtmsClient(FtmsWebView, FtmsReactUrl);
         _telegramReceiver = new TelegramCallbackReceiver(_stateDirectory,
             () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId),
             _http, ClaimTicketFromTelegramAsync,
@@ -174,8 +175,8 @@ public partial class CompactWindow : Window
         _ftmsClient.LoginRecoveryStatusChanged += OnMonitorLoginRecoveryStatusChanged;
         ApplyRefreshSettings();
         _telegramLoopTask = Task.Run(() => RunTelegramLoopAsync(_lifetime.Token));
-        FtmsWebView.Source = new Uri(FtmsUrl);
-        MonitorWebView.Source = new Uri(FtmsUrl);
+        FtmsWebView.Source = new Uri(FtmsReactUrl);
+        MonitorWebView.Source = new Uri(FtmsLegacyUrl);
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -319,7 +320,7 @@ public partial class CompactWindow : Window
             if (hiddenIdentity?.UserId != expectedAccountId)
             {
                 if (_hiddenReloadAttempts++ < 2)
-                    MonitorWebView.CoreWebView2?.Reload();
+                    MonitorWebView.Source = new Uri(FtmsLegacyUrl);
                 else
                     MonitorText.Text = "Tài khoản WebView giám sát không khớp; đã tạm dừng để tránh lẫn dữ liệu.";
                 return;
@@ -340,7 +341,11 @@ public partial class CompactWindow : Window
     {
         if (_lifetime.IsCancellationRequested || _ftmsClient is null) return;
         var uri = MonitorWebView.Source;
-        if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri)) return;
+        if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri))
+        {
+            MonitorWebView.Source = new Uri(FtmsLegacyUrl);
+            return;
+        }
 
         CurrentUserIdentity? hiddenIdentity;
         try { hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token); }
@@ -354,7 +359,10 @@ public partial class CompactWindow : Window
         }
         else
         {
-            MonitorWebView.CoreWebView2?.Reload();
+            if (_hiddenReloadAttempts++ < 3)
+                MonitorWebView.Source = new Uri(FtmsLegacyUrl);
+            else
+                MonitorText.Text = "Tài khoản WebView giám sát không khớp; đã tạm dừng để tránh lẫn dữ liệu.";
         }
     }
 
@@ -385,7 +393,7 @@ public partial class CompactWindow : Window
 
                 if (wasLoggingIn && !string.Equals(uri.AbsolutePath.TrimEnd('/'), "/ihub/react/list", StringComparison.OrdinalIgnoreCase))
                 {
-                    FtmsWebView.Source = new Uri(FtmsUrl);
+                    FtmsWebView.Source = new Uri(FtmsReactUrl);
                     return;
                 }
 
@@ -398,6 +406,8 @@ public partial class CompactWindow : Window
                 for (var attempt = 0; attempt < 3 && visibleIdentity is null; attempt++)
                 {
                     visibleIdentity = await _visibleIdentityClient.GetCurrentUserAsync(_lifetime.Token);
+                    if (visibleIdentity is null && _ftmsClient is not null)
+                        visibleIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token);
                     if (visibleIdentity is null) await Task.Delay(1000, _lifetime.Token);
                 }
                 if (navigationGeneration != _visibleNavigationGeneration) return;
@@ -413,6 +423,11 @@ public partial class CompactWindow : Window
                     return;
                 }
                 SetSessionStatus("Đã kết nối", "#4AA47B");
+                _ = FtmsWebView.ExecuteScriptAsync(
+                    $"globalThis.userID = {visibleIdentity.UserId}; " +
+                    $"globalThis.Username = {JsonSerializer.Serialize(visibleIdentity.UserName)}; " +
+                    $"globalThis.UserDept = {visibleIdentity.DepartmentId?.ToString() ?? "null"}; " +
+                    $"globalThis.DepartmentName = {JsonSerializer.Serialize(visibleIdentity.DepartmentName)};");
                 if (_expectedAccountId != visibleIdentity.UserId)
                 {
                     DeactivateAccount();
@@ -421,7 +436,7 @@ public partial class CompactWindow : Window
                     _hiddenReloadAttempts = 0;
                     if (MonitorWebView.Source is null ||
                         !WebViewLoginRecovery.IsFtmsIhubUri(MonitorWebView.Source))
-                        MonitorWebView.Source = new Uri(FtmsUrl);
+                        MonitorWebView.Source = new Uri(FtmsLegacyUrl);
                     else
                         _ = CheckAndStartMonitorFromVisibleIdentityAsync(visibleIdentity.UserId);
                 }
@@ -493,7 +508,7 @@ public partial class CompactWindow : Window
         {
             var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
             var databasePath = Path.Combine(root, $"ftms-user-{accountId}.db");
-            var settings = new AppSettings { FtmsUrl = FtmsUrl, PollIntervalSeconds = 2, IdleDelaySeconds = 0 };
+            var settings = new AppSettings { FtmsUrl = FtmsLegacyUrl, PollIntervalSeconds = 2, IdleDelaySeconds = 0 };
             var telegram = new TelegramOutboxSender(databasePath,
                 () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _http,
                 getCurrentUserId: () => _activeAccountId);
@@ -535,8 +550,8 @@ public partial class CompactWindow : Window
         }
         finally { _settingsOpen = false; MarkUserActivity(); }
     }
-    private void OpenFtms(object sender, RoutedEventArgs e) => FtmsWebView.Source = new Uri(FtmsUrl);
-    private void ReloadFtms(object sender, RoutedEventArgs e)
+    private void OpenFtms(object sender, RoutedEventArgs e) => FtmsWebView.Source = new Uri(FtmsReactUrl);
+    private async void ReloadFtms(object sender, RoutedEventArgs e)
     {
         MarkUserActivity();
         var monitor = _monitor;
@@ -545,14 +560,7 @@ public partial class CompactWindow : Window
             _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
 
         if (FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
-        _refreshInProgress = true;
-        MonitorText.Text = "Đang tải lại trang FTMS";
-        try { FtmsWebView.Reload(); }
-        catch (Exception ex)
-        {
-            _refreshInProgress = false;
-            MonitorText.Text = $"Không thể tải lại trang FTMS: {ex.Message}";
-        }
+        await RefreshTicketGridAsync();
     }
     private void OnUserActivity(object sender, InputEventArgs e) => MarkUserActivity();
     private void MarkUserActivity() => _lastUserActivity = DateTimeOffset.UtcNow;
@@ -580,16 +588,72 @@ public partial class CompactWindow : Window
         _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settingsStore.Current.AutoRefreshSeconds, 5, 3600)); _refreshTimer.Start();
     }
 
-    private void RunAutoRefresh()
+    private async void RunAutoRefresh()
     {
         if (!IsVisible || IsUserBusy() || FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
+        await RefreshTicketGridAsync();
+    }
+
+    private async Task RefreshTicketGridAsync()
+    {
+        if (FtmsWebView.CoreWebView2 is null || !_isListPage || _refreshInProgress) return;
         _refreshInProgress = true;
-        MonitorText.Text = $"Tự động tải lại trang FTMS lúc {DateTime.Now:HH:mm:ss}";
-        try { FtmsWebView.Reload(); }
+        const string script = """
+            (() => {
+              if (location.hostname.toLowerCase() !== 'ftms.fpt.net') return 'invalid-host';
+              if (Date.now() - (window.__ftmsCompanionLastInputAt || 0) < 15000) return 'busy';
+
+              // 1. Kendo pager refresh button (trên trang /ihub/list)
+              const kendoRefresh = document.querySelector('a.k-pager-refresh.k-link');
+              if (kendoRefresh && kendoRefresh.offsetParent !== null) {
+                kendoRefresh.click();
+                return 'kendo-btn';
+              }
+
+              // 2. Kendo Grid dataSource.read() trực tiếp
+              const kendoGrid = globalThis.jQuery?.('#list-grid').data('kendoGrid');
+              if (kendoGrid?.dataSource) {
+                kendoGrid.dataSource.read();
+                return 'kendo-ds';
+              }
+
+              // 3. React list refresh (trên trang /ihub/react/list)
+              const buttons = Array.from(document.querySelectorAll('button, a, span[role="button"], div[role="button"]'));
+              const refreshBtn = buttons.find(b => {
+                if (b.offsetParent === null) return false;
+                const text = (b.getAttribute('title') || b.getAttribute('aria-label') || b.innerText || '').trim().toLowerCase();
+                return text.includes('làm mới') || text.includes('tải lại') || text.includes('refresh');
+              }) || document.querySelector('.ant-btn-reload, .btn-refresh, [data-icon="reload"], [data-icon="sync"]')?.closest('button, a');
+
+              if (refreshBtn) {
+                refreshBtn.click();
+                return 'react-btn';
+              }
+
+              return 'none';
+            })()
+            """;
+        try
+        {
+            var raw = await FtmsWebView.ExecuteScriptAsync(script);
+            var result = raw?.Trim('"');
+            if (result is "kendo-btn" or "kendo-ds" or "react-btn")
+            {
+                MonitorText.Text = $"Tự động làm mới danh sách lúc {DateTime.Now:HH:mm:ss}";
+            }
+            else if (result == "none")
+            {
+                MonitorText.Text = $"Tự động tải lại trang FTMS lúc {DateTime.Now:HH:mm:ss}";
+                FtmsWebView.Reload();
+            }
+        }
         catch (Exception ex)
         {
+            MonitorText.Text = $"Không thể làm mới danh sách: {ex.Message}";
+        }
+        finally
+        {
             _refreshInProgress = false;
-            MonitorText.Text = $"Không thể tải lại trang FTMS: {ex.Message}";
         }
     }
 

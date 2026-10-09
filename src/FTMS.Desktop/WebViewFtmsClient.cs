@@ -39,10 +39,27 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken);
                 var json = await ExecuteJsonStringAsync(CurrentUserScript);
                 var identity = DeserializeCurrentUser(json);
-                if (identity is null) continue;
-                if (generation == _identityGeneration) _currentUser = identity;
-                return generation == _identityGeneration ? identity : null;
+                if (identity is not null)
+                {
+                    if (generation == _identityGeneration) _currentUser = identity;
+                    return generation == _identityGeneration ? identity : null;
+                }
             }
+
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                var asyncJson = await ExecuteAsyncJsonStringAsync(CurrentUserAsyncScript, timeout.Token);
+                var asyncIdentity = DeserializeCurrentUser(asyncJson);
+                if (asyncIdentity is not null)
+                {
+                    if (generation == _identityGeneration) _currentUser = asyncIdentity;
+                    return generation == _identityGeneration ? asyncIdentity : null;
+                }
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested) { }
+
             return null;
         }
         finally { _identityLock.Release(); }
@@ -1495,17 +1512,105 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     private const string CurrentUserScript = """
         (() => {
           try {
-            const userId = Number(globalThis.userID);
-            if (!Number.isInteger(userId) || userId <= 0) return JSON.stringify(null);
             const text = value => value == null || String(value).trim() === '' ? null : String(value).trim();
-            const departmentId = Number(globalThis.UserDept);
-            return JSON.stringify({
-              userId,
-              userName: text(globalThis.Username),
-              departmentId: Number.isFinite(departmentId) ? departmentId : null,
-              departmentName: text(globalThis.DepartmentName)
-            });
+            let userId = Number(globalThis.userID);
+            let userName = globalThis.Username;
+            let deptId = Number(globalThis.UserDept);
+            let deptName = globalThis.DepartmentName;
+
+            if (Number.isInteger(userId) && userId > 0) {
+              return JSON.stringify({
+                userId,
+                userName: text(userName),
+                departmentId: Number.isFinite(deptId) ? deptId : null,
+                departmentName: text(deptName)
+              });
+            }
+
+            for (const script of document.querySelectorAll('script')) {
+              const content = script.textContent || '';
+              if (content.includes('userID') && content.includes('Username')) {
+                const uidM = content.match(/(?:var\s+|window\.)?userID\s*=\s*['"]?(\d+)['"]?/i);
+                const unameM = content.match(/(?:var\s+|window\.)?Username\s*=\s*['"]([^'"]+)['"]/i);
+                const udeptM = content.match(/(?:var\s+|window\.)?UserDept\s*=\s*['"]?(\d+)['"]?/i);
+                const dnameM = content.match(/(?:var\s+|window\.)?DepartmentName\s*=\s*['"]([^'"]+)['"]/i);
+                if (uidM && uidM[1]) {
+                  userId = Number(uidM[1]);
+                  userName = unameM ? unameM[1] : null;
+                  deptId = udeptM ? Number(udeptM[1]) : null;
+                  deptName = dnameM ? dnameM[1] : null;
+                  if (Number.isInteger(userId) && userId > 0) {
+                    globalThis.userID = userId;
+                    if (userName) globalThis.Username = userName;
+                    if (Number.isFinite(deptId)) globalThis.UserDept = deptId;
+                    if (deptName) globalThis.DepartmentName = deptName;
+                    return JSON.stringify({
+                      userId,
+                      userName: text(userName),
+                      departmentId: Number.isFinite(deptId) ? deptId : null,
+                      departmentName: text(deptName)
+                    });
+                  }
+                }
+              }
+            }
+
+            return JSON.stringify(null);
           } catch { return JSON.stringify(null); }
+        })()
+        """;
+
+    private const string CurrentUserAsyncScript = """
+        (async () => {
+          try {
+            const text = value => value == null || String(value).trim() === '' ? null : String(value).trim();
+            let userId = Number(globalThis.userID);
+            let userName = globalThis.Username;
+            let deptId = Number(globalThis.UserDept);
+            let deptName = globalThis.DepartmentName;
+
+            if (Number.isInteger(userId) && userId > 0) {
+              return JSON.stringify({
+                userId,
+                userName: text(userName),
+                departmentId: Number.isFinite(deptId) ? deptId : null,
+                departmentName: text(deptName)
+              });
+            }
+
+            try {
+              const resp = await fetch('/ihub/list?tab=2', { credentials: 'same-origin', cache: 'no-store' });
+              if (resp.ok) {
+                const html = await resp.text();
+                const uidM = html.match(/(?:var\s+|window\.)?userID\s*=\s*['"]?(\d+)['"]?/i);
+                const unameM = html.match(/(?:var\s+|window\.)?Username\s*=\s*['"]([^'"]+)['"]/i);
+                const udeptM = html.match(/(?:var\s+|window\.)?UserDept\s*=\s*['"]?(\d+)['"]?/i);
+                const dnameM = html.match(/(?:var\s+|window\.)?DepartmentName\s*=\s*['"]([^'"]+)['"]/i);
+                if (uidM && uidM[1]) {
+                  userId = Number(uidM[1]);
+                  userName = unameM ? unameM[1] : null;
+                  deptId = udeptM ? Number(udeptM[1]) : null;
+                  deptName = dnameM ? dnameM[1] : null;
+                  if (Number.isInteger(userId) && userId > 0) {
+                    globalThis.userID = userId;
+                    if (userName) globalThis.Username = userName;
+                    if (Number.isFinite(deptId)) globalThis.UserDept = deptId;
+                    if (deptName) globalThis.DepartmentName = deptName;
+                    return JSON.stringify({
+                      userId,
+                      userName: text(userName),
+                      departmentId: Number.isFinite(deptId) ? deptId : null,
+                      departmentName: text(deptName)
+                    });
+                  }
+                }
+              }
+            } catch {}
+
+            return JSON.stringify(null);
+          } catch {
+            return JSON.stringify(null);
+          }
         })()
         """;
 
