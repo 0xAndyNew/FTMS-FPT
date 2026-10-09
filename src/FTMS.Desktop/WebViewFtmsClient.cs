@@ -1051,7 +1051,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         var code = JsonSerializer.Serialize(ticketCode);
         var script = $$"""
             (async () => {
-              const requestTimeoutMs = 700;
+              const requestTimeoutMs = 2500;
               const controller = new AbortController();
               const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
               try {
@@ -1119,35 +1119,37 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const readMailFile = async fileId => {
                   if (!fileId) return '';
                   const cleanId = String(fileId).trim();
+                  let response = null;
                   try {
-                    let response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId), {
+                    response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId), {
                       credentials: 'same-origin', signal: controller.signal,
                       headers: { 'X-Requested-With': 'XMLHttpRequest' }
                     });
-                    if (!response.ok) {
-                      response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId) + '&storage=2', {
-                        credentials: 'same-origin', signal: controller.signal,
-                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                      });
+                  } catch (error) {
+                    if (error?.name === 'AbortError') throw error;
+                  }
+                  if (!response?.ok) {
+                    response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId) + '&storage=2', {
+                      credentials: 'same-origin', signal: controller.signal,
+                      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    });
+                  }
+                  if (!response.ok) throw new Error(`FTMS email body HTTP ${response.status}`);
+                  let text = await response.text();
+                  if (!text) return '';
+                  try {
+                    const parsed = JSON.parse(text);
+                    if (typeof parsed === 'string') text = parsed;
+                    else if (parsed && typeof parsed === 'object') {
+                      text = parsed.contents || parsed.Contents || parsed.content || parsed.Content ||
+                             parsed.body || parsed.Body || parsed.html || parsed.Html ||
+                             (typeof parsed.data === 'string' ? parsed.data : parsed.data?.content || parsed.data?.body || parsed.data?.contents) ||
+                             (typeof parsed.Data === 'string' ? parsed.Data : parsed.Data?.Content || parsed.Data?.Body || parsed.Data?.Contents) ||
+                             text;
                     }
-                    if (!response.ok) return '';
-                    let text = await response.text();
-                    if (!text) return '';
-                    try {
-                      const parsed = JSON.parse(text);
-                      if (typeof parsed === 'string') text = parsed;
-                      else if (parsed && typeof parsed === 'object') {
-                        text = parsed.contents || parsed.Contents || parsed.content || parsed.Content ||
-                               parsed.body || parsed.Body || parsed.html || parsed.Html ||
-                               (typeof parsed.data === 'string' ? parsed.data : parsed.data?.content || parsed.data?.body || parsed.data?.contents) ||
-                               (typeof parsed.Data === 'string' ? parsed.Data : parsed.Data?.Content || parsed.Data?.Body || parsed.Data?.Contents) ||
-                               text;
-                      }
-                    } catch {}
-                    const str = String(text || '').trim();
-                    if (str && str !== '[object Object]') return str;
                   } catch {}
-                  return '';
+                  const str = String(text || '').trim();
+                  return str && str !== '[object Object]' ? str : '';
                 };
                 const extractFileId = obj => {
                   if (!obj) return null;
@@ -1179,6 +1181,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 };
 
                 // FTMS expects jQuery's default form encoding rather than JSON.
+                let historySucceeded = false;
                 const historyResponse = await fetch('/ihub/Email/GetEmailByCode', {
                   method: 'POST',
                   credentials: 'same-origin', signal: controller.signal,
@@ -1187,6 +1190,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   body: new URLSearchParams({ code: {{code}} }).toString()
                 });
                 if (historyResponse.ok) {
+                  historySucceeded = true;
                   let history = unwrapRows(await historyResponse.json());
                   if (history.length) {
                     const dateValue = value => {
@@ -1247,7 +1251,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   headers: { 'X-Requested-With': 'XMLHttpRequest' },
                   body: form
                 });
-                if (!metaResponse.ok) return JSON.stringify(null);
+                if (!metaResponse.ok) {
+                  if (historySucceeded) return JSON.stringify(null);
+                  throw new Error(`FTMS email API HTTP ${historyResponse.status}; fallback HTTP ${metaResponse.status}`);
+                }
                 const meta = await metaResponse.json();
                 const rows = unwrapRows(meta);
                 if (!rows.length) return JSON.stringify(null);
@@ -1296,12 +1303,16 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     from: sender, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || null, body });
                 }
                 return JSON.stringify(null);
-              } catch { return JSON.stringify(null); }
+              } catch (error) {
+                return JSON.stringify({ error: error?.name === 'AbortError'
+                  ? 'FTMS email API timeout'
+                  : String(error?.message || error || 'FTMS email API error') });
+              }
               finally { clearTimeout(timeoutId); }
             })()
             """;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromMilliseconds(800));
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
         try
         {
             var json = await ExecuteAsyncJsonStringAsync(script, timeout.Token);
@@ -1309,7 +1320,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return null;
+            throw new TimeoutException($"FTMS không phản hồi email của {ticketCode} trong 3 giây.");
         }
     }
 
@@ -1564,6 +1575,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             var root = document.RootElement;
             if (root.ValueKind == JsonValueKind.String) return DeserializeLatestEmail(root.GetString() ?? "null");
             if (root.ValueKind != JsonValueKind.Object) return null;
+            if (root.TryGetProperty("error", out var error))
+                throw new InvalidOperationException(error.GetString() ?? "Không thể đọc email FTMS.");
             string? ReadString(string name) => root.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null
                 ? value.ToString() : null;
             var sentAtText = ReadString("sentAt");

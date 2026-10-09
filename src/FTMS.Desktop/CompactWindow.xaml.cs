@@ -558,30 +558,17 @@ public partial class CompactWindow : Window
         _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settingsStore.Current.AutoRefreshSeconds, 5, 3600)); _refreshTimer.Start();
     }
 
-    private async void RunAutoRefresh()
+    private void RunAutoRefresh()
     {
-        if (!IsVisible || IsUserBusy()) return;
-        await RefreshTicketGridAsync();
-    }
-
-    private async Task RefreshTicketGridAsync()
-    {
-        if (FtmsWebView.CoreWebView2 is null || !_isListPage || _refreshInProgress) return;
+        if (!IsVisible || IsUserBusy() || FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
         _refreshInProgress = true;
-        const string script = """
-            (() => {
-              if (location.hostname.toLowerCase() !== 'ftms.fpt.net' ||
-                  !/^\/ihub\/list\/?$/i.test(location.pathname)) return false;
-              if (Date.now() - (window.__ftmsCompanionLastInputAt || 0) < 15000) return false;
-              const refresh = document.querySelector('a.k-pager-refresh.k-link');
-              if (!refresh) return false;
-              refresh.click();
-              return true;
-            })()
-            """;
-        try { await FtmsWebView.ExecuteScriptAsync(script); }
-        catch (Exception ex) { MonitorText.Text = $"Không thể làm mới danh sách: {ex.Message}"; }
-        finally { _refreshInProgress = false; }
+        MonitorText.Text = $"Tự động tải lại trang FTMS lúc {DateTime.Now:HH:mm:ss}";
+        try { FtmsWebView.Reload(); }
+        catch (Exception ex)
+        {
+            _refreshInProgress = false;
+            MonitorText.Text = $"Không thể tải lại trang FTMS: {ex.Message}";
+        }
     }
 
     private async Task RunTelegramLoopAsync(CancellationToken cancellationToken)

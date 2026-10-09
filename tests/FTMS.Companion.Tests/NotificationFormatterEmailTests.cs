@@ -136,6 +136,147 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
+    public async Task ChangeDetector_CreatedEvent_RetriesMissingEmailAndUsesFullEmail()
+    {
+        var sentAt = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var email = Email("101", sentAt, "Nội dung email đầy đủ sau khi thử lại");
+        var calls = 0;
+        var client = new TestFtmsClient(() => ++calls == 1 ? null : email);
+        var snapshot = Snapshot("RQ-CREATED-RETRY", TicketStatus.New, null, sentAt) with
+        {
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot>(), [snapshot], client,
+            new AppSettings(), CancellationToken.None);
+
+        var createdEvent = Assert.Single(events);
+        Assert.Equal(TicketEventType.Created, createdEvent.EventType);
+        Assert.Equal(2, calls);
+        Assert.Equal(email.Body, createdEvent.LatestEmail?.Body);
+        Assert.Contains(email.Body!, NotificationFormatter.Format(createdEvent, "https://ftms.fpt.net/ihub"));
+    }
+
+    [Fact]
+    public async Task ChangeDetector_CreatedEvent_UsesCompleteListEmailWithoutFetching()
+    {
+        var sentAt = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var email = Email("104", sentAt, "Nội dung email đầy đủ từ danh sách");
+        var calls = 0;
+        var client = new TestFtmsClient(() =>
+        {
+            calls++;
+            return null;
+        });
+        var snapshot = Snapshot("RQ-CREATED-FAST", TicketStatus.New, email, sentAt) with
+        {
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot>(), [snapshot], client,
+            new AppSettings(), CancellationToken.None);
+
+        var createdEvent = Assert.Single(events);
+        Assert.Equal(TicketEventType.Created, createdEvent.EventType);
+        Assert.Equal(0, calls);
+        Assert.Equal(email.Body, createdEvent.LatestEmail?.Body);
+        var message = NotificationFormatter.Format(createdEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("Nội dung email đầy đủ từ danh s&#225;ch", message);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_UnassignedReminder_RetriesMissingEmailWithoutDuplicateEmailEvent()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var email = Email("102", now, "Nội dung email cho nhắc ticket chưa nhận");
+        var oldSnapshot = Snapshot("RQ-REMINDER-RETRY", TicketStatus.New, null, now.AddMinutes(-6)) with
+        {
+            CreatedAt = now.AddMinutes(-6),
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+        var currentSnapshot = oldSnapshot with { UpdatedAt = now };
+        var calls = 0;
+        var client = new TestFtmsClient(() => ++calls == 1 ? null : email);
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot> { [oldSnapshot.Code] = oldSnapshot },
+            [currentSnapshot], client, new AppSettings(), CancellationToken.None);
+
+        var reminder = Assert.Single(events);
+        Assert.Equal(TicketEventType.UnassignedReminder, reminder.EventType);
+        Assert.Equal(2, calls);
+        Assert.Equal(email.Body, reminder.LatestEmail?.Body);
+        Assert.DoesNotContain(events, item => item.EventType == TicketEventType.EmailReceived);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_CreatedEvent_AllowsEmailFetchLongerThanOldDeadline()
+    {
+        var sentAt = DateTimeOffset.UtcNow;
+        var email = Email("103", sentAt, "Nội dung email tải chậm nhưng thành công");
+        var client = new TestFtmsClient(onGetLatestEmailAsync: async cancellationToken =>
+        {
+            await Task.Delay(900, cancellationToken);
+            return email;
+        });
+        var snapshot = Snapshot("RQ-CREATED-SLOW", TicketStatus.New, null, sentAt);
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot>(), [snapshot], client,
+            new AppSettings(), CancellationToken.None);
+
+        var createdEvent = Assert.Single(events);
+        Assert.Equal(email.Body, createdEvent.LatestEmail?.Body);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_CreatedEvent_PropagatesCallerCancellation()
+    {
+        var client = new TestFtmsClient(onGetLatestEmailAsync: async cancellationToken =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return null;
+        });
+        var snapshot = Snapshot("RQ-CREATED-CANCELLED", TicketStatus.New, null,
+            DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new TicketChangeDetector().DetectAsync(
+                new Dictionary<string, TicketSnapshot>(), [snapshot], client,
+                new AppSettings(), cancellation.Token));
+    }
+
+    [Fact]
+    public async Task ChangeDetector_CreatedEvent_DefinitiveNoEmailStillCreatesNotification()
+    {
+        var calls = 0;
+        var client = new TestFtmsClient(() =>
+        {
+            calls++;
+            return null;
+        });
+        var snapshot = Snapshot("RQ-CREATED-NO-EMAIL", TicketStatus.New, null, DateTimeOffset.UtcNow);
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot>(), [snapshot], client,
+            new AppSettings(), CancellationToken.None);
+
+        var createdEvent = Assert.Single(events);
+        Assert.Equal(2, calls);
+        Assert.Null(createdEvent.LatestEmail);
+        var message = NotificationFormatter.Format(createdEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("TICKET MỚI", message);
+        Assert.DoesNotContain("<blockquote>", message);
+    }
+
+    [Fact]
     public async Task ChangeDetector_PreservesExistingFullEmail_WhenNewPollHasTruncatedPreview()
     {
         var detector = new TicketChangeDetector();
@@ -160,8 +301,12 @@ public sealed class NotificationFormatterEmailTests
             LatestEmail = truncatedEmail
         };
 
-        // Client returns null or truncated for this poll
-        var client = new TestFtmsClient(onGetLatestEmail: () => truncatedEmail);
+        var calls = 0;
+        var client = new TestFtmsClient(onGetLatestEmail: () =>
+        {
+            calls++;
+            return truncatedEmail;
+        });
 
         var events = await detector.DetectAsync(
             new Dictionary<string, TicketSnapshot> { [code] = oldSnapshot },
@@ -176,10 +321,44 @@ public sealed class NotificationFormatterEmailTests
         Assert.Equal("Full email body with all details", changeEvent.LatestEmail.Body);
         Assert.NotNull(changeEvent.Snapshot.LatestEmail);
         Assert.Equal("Full email body with all details", changeEvent.Snapshot.LatestEmail.Body);
+        Assert.Equal(0, calls);
     }
 
     [Fact]
-    public async Task ChangeDetector_AssignmentWithoutEmail_FetchesEmailOnlyOnce()
+    public async Task ChangeDetector_NewerTruncatedPreview_DoesNotUseOlderCompleteEmail()
+    {
+        var sentAt = DateTimeOffset.UtcNow;
+        var oldEmail = Email("100", sentAt.AddSeconds(-30), "Nội dung email cũ đầy đủ");
+        var preview = Email("101", sentAt, "Dear KT preview...");
+        var fullEmail = Email("101", sentAt, "Nội dung email mới đầy đủ sau khi tải lại");
+        var oldSnapshot = Snapshot("RQ-NEWER-PREVIEW", TicketStatus.Assigned, oldEmail,
+            sentAt.AddMinutes(-5)) with
+        {
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+        var currentSnapshot = oldSnapshot with
+        {
+            AssigneeId = 42,
+            AssigneeName = "DuyPK21",
+            LatestEmail = preview,
+            UpdatedAt = sentAt
+        };
+        var calls = 0;
+        var client = new TestFtmsClient(() => ++calls == 1 ? preview : fullEmail);
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot> { [oldSnapshot.Code] = oldSnapshot },
+            [currentSnapshot], client, new AppSettings(), CancellationToken.None);
+
+        var assignmentEvent = Assert.Single(events, e => e.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(2, calls);
+        Assert.Equal("101", assignmentEvent.LatestEmail?.Id);
+        Assert.Equal(fullEmail.Body, assignmentEvent.LatestEmail?.Body);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_AssignmentWithoutEmail_FetchesOnlyForCriticalEvent()
     {
         var calls = 0;
         var oldSnapshot = Snapshot("RQ-ASSIGNMENT", TicketStatus.Assigned,
@@ -307,25 +486,22 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
-    public async Task ChangeDetector_StatusChange_RefreshesCompleteCachedEmailFromHistory()
+    public async Task ChangeDetector_StatusChange_UsesCompleteListEmailWithoutRefreshingHistory()
     {
         var sentAt = DateTimeOffset.UtcNow;
-        var oldEmail = new LatestEmail("100", sentAt.AddMinutes(-38), "TrungNT105@fpt.com",
-            "Tiêu đề kiểm thử", "Nội dung phản hồi cũ");
-        var newEmail = new LatestEmail("101", sentAt, "tunglamtu94@gmail.com",
-            "Tiêu đề kiểm thử", "Nội dung phản hồi mới nhất");
-        var oldSnapshot = Snapshot("RQ202610070261", TicketStatus.Paused, oldEmail, sentAt.AddMinutes(-5));
+        var email = new LatestEmail("100", sentAt.AddMinutes(-38), "TrungNT105@fpt.com",
+            "Tiêu đề kiểm thử", "Nội dung phản hồi đầy đủ");
+        var oldSnapshot = Snapshot("RQ202610070261", TicketStatus.Paused, email, sentAt.AddMinutes(-5));
         var currentSnapshot = oldSnapshot with
         {
             Status = TicketStatus.InProgress,
-            LatestEmail = oldEmail,
             UpdatedAt = sentAt
         };
         var calls = 0;
         var client = new TestFtmsClient(() =>
         {
             calls++;
-            return newEmail;
+            return null;
         });
 
         var events = await new TicketChangeDetector().DetectAsync(
@@ -333,45 +509,14 @@ public sealed class NotificationFormatterEmailTests
             [currentSnapshot], client, new AppSettings(), CancellationToken.None);
 
         var statusEvent = Assert.Single(events, e => e.EventType == TicketEventType.StatusChanged);
-        Assert.Equal("101", statusEvent.LatestEmail?.Id);
-        Assert.Equal(newEmail.Body, statusEvent.LatestEmail?.Body);
-
+        Assert.Equal("100", statusEvent.LatestEmail?.Id);
+        Assert.Equal(email.Body, statusEvent.LatestEmail?.Body);
         Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
-        Assert.Equal(1, calls);
+        Assert.Equal(0, calls);
 
         var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("From: tunglamtu94@gmail.com", message);
-        Assert.Contains("Nội dung phản hồi mới nhất", message);
-        Assert.DoesNotContain("TrungNT105@fpt.com", message);
-        Assert.DoesNotContain("Nội dung phản hồi cũ", message);
-    }
-
-    [Fact]
-    public async Task ChangeDetector_StatusChange_RetriesWhenHistoryStillReturnsCachedEmail()
-    {
-        var sentAt = DateTimeOffset.UtcNow;
-        var oldEmail = Email("100", sentAt.AddMinutes(-38), "Nội dung phản hồi cũ đầy đủ");
-        var newEmail = Email("101", sentAt, "Nội dung phản hồi mới nhất");
-        var oldSnapshot = Snapshot("RQ-EMAIL-EVENTUAL", TicketStatus.Paused, oldEmail, sentAt.AddMinutes(-5));
-        var currentSnapshot = oldSnapshot with
-        {
-            Status = TicketStatus.InProgress,
-            LatestEmail = oldEmail,
-            UpdatedAt = sentAt
-        };
-        var calls = 0;
-        var client = new TestFtmsClient(() => ++calls == 1 ? oldEmail : newEmail);
-
-        var events = await new TicketChangeDetector().DetectAsync(
-            new Dictionary<string, TicketSnapshot> { [oldSnapshot.Code] = oldSnapshot },
-            [currentSnapshot], client, new AppSettings(), CancellationToken.None);
-
-        var statusEvent = Assert.Single(events, e => e.EventType == TicketEventType.StatusChanged);
-        Assert.Equal("101", statusEvent.LatestEmail?.Id);
-        Assert.Equal(newEmail.Body, statusEvent.LatestEmail?.Body);
-
-        Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
-        Assert.Equal(2, calls);
+        Assert.Contains("From: TrungNT105@fpt.com", message);
+        Assert.Contains("Nội dung phản hồi đầy đủ", message);
     }
 
     [Fact]

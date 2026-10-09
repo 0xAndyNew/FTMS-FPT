@@ -614,7 +614,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             personal.Count(x => x.Status == TicketStatus.Paused),
             personalClosedToday));
 
-        // 2. Persist state changes before optional email/SLA/reminder enrichment.
+        // 2. Enrich notification events, then persist state changes.
         Dictionary<string, TicketSnapshot> previousSnapshots;
         IReadOnlyList<TicketEvent> criticalEvents;
         await _stateLock.WaitAsync(cancellationToken);
@@ -625,12 +625,28 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 previousSnapshots = new Dictionary<string, TicketSnapshot>(_active,
                     StringComparer.OrdinalIgnoreCase);
             }
+            for (var i = 0; i < tickets.Count; i++)
+            {
+                var ticket = tickets[i];
+                if (!previousSnapshots.TryGetValue(ticket.Code, out var previous)) continue;
+                var keepResponseReminder = ticket.Status == TicketStatus.InProgress;
+                tickets[i] = ticket with
+                {
+                    LatestEmail = TicketChangeDetector.SelectEmail(ticket.LatestEmail, previous.LatestEmail),
+                    ResponseReminderEmailId = keepResponseReminder
+                        ? ticket.ResponseReminderEmailId ?? previous.ResponseReminderEmailId
+                        : null,
+                    ResponseReminderSince = keepResponseReminder
+                        ? ticket.ResponseReminderSince ?? previous.ResponseReminderSince
+                        : null
+                };
+            }
             var criticalList = detector.DetectCritical(previousSnapshots, tickets, settings).ToList();
             for (var i = 0; i < criticalList.Count; i++)
             {
                 var evt = criticalList[i];
-                var enriched = await TicketChangeDetector.ResolveLatestEmailWithDeadlineAsync(client, evt.TicketCode,
-                    cancellationToken, retryWhenMissing: false, evt.LatestEmail, evt.Snapshot.LatestEmail);
+                var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
+                    cancellationToken, evt.LatestEmail, evt.Snapshot.LatestEmail);
                 if (enriched is not null)
                 {
                     criticalList[i] = evt with
