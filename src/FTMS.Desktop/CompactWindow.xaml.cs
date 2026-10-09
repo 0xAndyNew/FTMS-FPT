@@ -311,13 +311,33 @@ public partial class CompactWindow : Window
         if (WebViewLoginRecovery.IsFtmsIhubUri(uri))
         {
             _ftmsClient.NotifyTargetReached();
-            if (_expectedAccountId is null) return;
-            var expectedAccountId = _expectedAccountId.Value;
             CurrentUserIdentity? hiddenIdentity;
             try { hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token); }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }
-            if (_expectedAccountId != expectedAccountId) return;
-            if (hiddenIdentity?.UserId != expectedAccountId)
+
+            if (hiddenIdentity is not null && hiddenIdentity.UserId > 0)
+            {
+                if (_expectedAccountId is null)
+                {
+                    _expectedAccountId = hiddenIdentity.UserId;
+                    SetSessionStatus("Đã kết nối", "#4AA47B");
+                    UpdateDashboard(new DashboardSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, hiddenIdentity));
+                    _ = FtmsWebView.ExecuteScriptAsync(
+                        $"globalThis.userID = {hiddenIdentity.UserId}; " +
+                        $"globalThis.Username = {JsonSerializer.Serialize(hiddenIdentity.UserName)}; " +
+                        $"globalThis.UserDept = {hiddenIdentity.DepartmentId?.ToString() ?? "null"}; " +
+                        $"globalThis.DepartmentName = {JsonSerializer.Serialize(hiddenIdentity.DepartmentName)};");
+                }
+
+                if (_expectedAccountId == hiddenIdentity.UserId)
+                {
+                    _hiddenReloadAttempts = 0;
+                    await StartMonitorOnceAsync(hiddenIdentity.UserId);
+                    return;
+                }
+            }
+
+            if (_expectedAccountId is not null && hiddenIdentity?.UserId != _expectedAccountId)
             {
                 if (_hiddenReloadAttempts++ < 2)
                     MonitorWebView.Source = new Uri(FtmsLegacyUrl);
@@ -325,8 +345,6 @@ public partial class CompactWindow : Window
                     MonitorText.Text = "Tài khoản WebView giám sát không khớp; đã tạm dừng để tránh lẫn dữ liệu.";
                 return;
             }
-            _hiddenReloadAttempts = 0;
-            await StartMonitorOnceAsync(expectedAccountId);
             return;
         }
         if (WebViewLoginRecovery.IsLoginUri(uri) || WebViewLoginRecovery.IsAdfsUri(uri))
@@ -560,7 +578,7 @@ public partial class CompactWindow : Window
             _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
 
         if (FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
-        await RefreshTicketGridAsync();
+        await RefreshTicketGridAsync(fallbackToReload: true);
     }
     private void OnUserActivity(object sender, InputEventArgs e) => MarkUserActivity();
     private void MarkUserActivity() => _lastUserActivity = DateTimeOffset.UtcNow;
@@ -591,10 +609,10 @@ public partial class CompactWindow : Window
     private async void RunAutoRefresh()
     {
         if (!IsVisible || IsUserBusy() || FtmsWebView.CoreWebView2 is null || _refreshInProgress) return;
-        await RefreshTicketGridAsync();
+        await RefreshTicketGridAsync(fallbackToReload: false);
     }
 
-    private async Task RefreshTicketGridAsync()
+    private async Task RefreshTicketGridAsync(bool fallbackToReload = false)
     {
         if (FtmsWebView.CoreWebView2 is null || !_isListPage || _refreshInProgress) return;
         _refreshInProgress = true;
@@ -617,7 +635,15 @@ public partial class CompactWindow : Window
                 return 'kendo-ds';
               }
 
-              // 3. React list refresh (trên trang /ihub/react/list)
+              // 3. React list refresh qua nút Tìm kiếm (trên trang /ihub/react/list)
+              const searchBtn = document.querySelector('button .anticon-search, .anticon-search')?.closest('button')
+                || document.querySelector('input[placeholder*="Tìm kiếm" i] ~ button, input[placeholder*="Tìm kiếm" i] + button');
+              if (searchBtn && searchBtn.offsetParent !== null) {
+                searchBtn.click();
+                return 'react-search-btn';
+              }
+
+              // 4. React list refresh qua nút bấm làm mới nếu có
               const buttons = Array.from(document.querySelectorAll('button, a, span[role="button"], div[role="button"]'));
               const refreshBtn = buttons.find(b => {
                 if (b.offsetParent === null) return false;
@@ -637,13 +663,13 @@ public partial class CompactWindow : Window
         {
             var raw = await FtmsWebView.ExecuteScriptAsync(script);
             var result = raw?.Trim('"');
-            if (result is "kendo-btn" or "kendo-ds" or "react-btn")
+            if (result is "kendo-btn" or "kendo-ds" or "react-btn" or "react-search-btn")
             {
                 MonitorText.Text = $"Tự động làm mới danh sách lúc {DateTime.Now:HH:mm:ss}";
             }
-            else if (result == "none")
+            else if (fallbackToReload && result == "none")
             {
-                MonitorText.Text = $"Tự động tải lại trang FTMS lúc {DateTime.Now:HH:mm:ss}";
+                MonitorText.Text = $"Tải lại trang FTMS lúc {DateTime.Now:HH:mm:ss}";
                 FtmsWebView.Reload();
             }
         }
