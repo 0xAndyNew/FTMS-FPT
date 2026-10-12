@@ -398,21 +398,27 @@ public sealed class TicketMonitorTests
         var statusEvent = Assert.Single(store.SavedEvents, item =>
             item.TicketCode == paused.Code && item.EventType == TicketEventType.StatusChanged);
         Assert.Equal(1, client.GetLatestEmailCallCount);
-        Assert.Equal("FTMS có email mới", statusEvent.Reason);
+        Assert.Equal("Tự động mở lại do có phản hồi mới", statusEvent.Reason);
         Assert.Equal(newEmail, statusEvent.LatestEmail);
         Assert.Equal(newEmail, statusEvent.Snapshot.LatestEmail);
-        Assert.DoesNotContain(store.SavedEvents, item =>
+        var emailEvent = Assert.Single(store.SavedEvents, item =>
             item.TicketCode == paused.Code && item.EventType == TicketEventType.EmailReceived);
+        Assert.Equal(newEmail, emailEvent.LatestEmail);
         Assert.Equal(newEmail, monitor.GetActiveSnapshots().Single(item =>
             item.Code == paused.Code).LatestEmail);
 
-        var message = Assert.Single(store.SavedMessages);
-        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
-        Assert.Contains("From: chiennh29@ghtk.co", message);
-        Assert.Contains("Time: 13:44:09 09/10/2026", message);
-        Assert.Contains(System.Net.WebUtility.HtmlEncode(newEmail.Body!), message);
-        Assert.DoesNotContain("DuyBD4@fpt.com", message);
-        Assert.DoesNotContain(System.Net.WebUtility.HtmlEncode(oldEmail.Body!), message);
+        Assert.Equal(2, store.SavedMessages.Count);
+        var statusMsg = Assert.Single(store.SavedMessages, m => m.Contains("CHUYỂN TRẠNG THÁI TICKET"));
+        Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMsg);
+        Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMsg);
+        Assert.DoesNotContain("<blockquote>", statusMsg);
+
+        var emailMsg = Assert.Single(store.SavedMessages, m => m.Contains("CÓ EMAIL PHẢN HỒI MỚI"));
+        Assert.Contains("From: chiennh29@ghtk.co", emailMsg);
+        Assert.Contains("Time: 13:44:09 09/10/2026", emailMsg);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(newEmail.Body!), emailMsg);
+        Assert.DoesNotContain("DuyBD4@fpt.com", emailMsg);
+        Assert.DoesNotContain(System.Net.WebUtility.HtmlEncode(oldEmail.Body!), emailMsg);
     }
 
     [Fact]
@@ -844,8 +850,8 @@ public sealed class TicketMonitorTests
         Assert.Equal(TicketStatus.Paused, statusEvent.CurrentStatus);
 
         var message = Assert.Single(store.SavedMessages);
-        Assert.Contains("THAY ĐỔI TRẠNG THÁI", message);
-        Assert.Contains("Đang thực hiện ➔ Tạm ngưng", message);
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", message);
+        Assert.Contains("Chuyển trạng thái:</b> Đang thực hiện ➔ Tạm ngưng", message);
     }
 
     [Fact]

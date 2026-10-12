@@ -84,10 +84,16 @@ public sealed class TicketChangeDetector
             if (enriched is null) continue;
 
             previous.TryGetValue(evt.TicketCode, out var previousSnapshot);
-            var enrichedSnapshot = evt.Snapshot with { LatestEmail = enriched };
-            var reason = isResponseTransition && IsNewEmail(previousSnapshot?.LatestEmail, enriched)
-                ? "FTMS có email mới"
+            var isNewResponse = isResponseTransition && IsNewEmail(previousSnapshot?.LatestEmail, enriched);
+            var reason = isNewResponse
+                ? "Tự động mở lại do có phản hồi mới"
                 : evt.Reason;
+            var enrichedSnapshot = evt.Snapshot with
+            {
+                LatestEmail = enriched,
+                ResponseReminderEmailId = isNewResponse ? enriched.Id : evt.Snapshot.ResponseReminderEmailId,
+                ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : evt.Snapshot.ResponseReminderSince
+            };
             result[i] = evt with
             {
                 Reason = reason,
@@ -97,7 +103,12 @@ public sealed class TicketChangeDetector
             var currentIndex = enrichedCurrent.FindIndex(item =>
                 string.Equals(item.Code, evt.TicketCode, StringComparison.OrdinalIgnoreCase));
             if (currentIndex >= 0)
-                enrichedCurrent[currentIndex] = enrichedCurrent[currentIndex] with { LatestEmail = enriched };
+                enrichedCurrent[currentIndex] = enrichedCurrent[currentIndex] with
+                {
+                    LatestEmail = enriched,
+                    ResponseReminderEmailId = isNewResponse ? enriched.Id : enrichedCurrent[currentIndex].ResponseReminderEmailId,
+                    ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : enrichedCurrent[currentIndex].ResponseReminderSince
+                };
         }
         var supplementalEvents = await DetectSupplementalAsync(previous, enrichedCurrent, client, settings, cancellationToken);
         result.AddRange(supplementalEvents);
@@ -131,7 +142,7 @@ public sealed class TicketChangeDetector
             LatestEmail? fetchedEmail = null;
             var emailFetched = false;
             var isStateTransition = old.Status != snapshot.Status || old.AssigneeId != snapshot.AssigneeId;
-            var emailIncludedInEvent = isStateTransition;
+            var emailIncludedInEvent = old.AssigneeId != snapshot.AssigneeId;
             async Task<LatestEmail?> LatestEmailAsync()
             {
                 if (emailFetched) return fetchedEmail;

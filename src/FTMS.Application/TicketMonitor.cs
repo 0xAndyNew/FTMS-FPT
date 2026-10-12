@@ -684,7 +684,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     criticalList[i] = evt with
                     {
                         Reason = isNewResponse
-                            ? "FTMS có email mới"
+                            ? "Tự động mở lại do có phản hồi mới"
                             : evt.Reason,
                         LatestEmail = enriched,
                         Snapshot = evt.Snapshot with

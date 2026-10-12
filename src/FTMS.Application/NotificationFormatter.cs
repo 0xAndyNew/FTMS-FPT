@@ -18,7 +18,7 @@ public static partial class NotificationFormatter
         text.AppendLine(item.EventType switch
         {
             TicketEventType.Created => "📨 <b>🔴 TICKET MỚI</b>",
-            TicketEventType.EmailReceived => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
+            TicketEventType.EmailReceived => "📧 <b>🔴 CÓ EMAIL PHẢN HỒI MỚI</b>",
             TicketEventType.UnassignedReminder => "🔔 <b>🟠 NHẮC TICKET CHƯA ĐƯỢC NHẬN</b>",
             TicketEventType.ResponseReminder => "🔔 <b>🟠 NHẮC TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
             TicketEventType.SlaThresholdReached when ticket.SlaType == 3 => "🚨 <b>🔴 ĐÃ VI PHẠM SLA</b>",
@@ -30,9 +30,7 @@ public static partial class NotificationFormatter
                 TicketStatus.Unprocessed => "⛔ <b>⚫ TICKET KHÔNG XỬ LÝ</b>",
                 _ => "✅ <b>🟢 TICKET KẾT THÚC</b>"
             },
-            TicketEventType.StatusChanged when ticket.Status == TicketStatus.InProgress &&
-                item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
-            TicketEventType.StatusChanged => "🔄 <b>🔵 THAY ĐỔI TRẠNG THÁI</b>",
+            TicketEventType.StatusChanged => "🔄 <b>🔵 CHUYỂN TRẠNG THÁI TICKET</b>",
             TicketEventType.AssignmentChanged => AssignmentTitle(item),
             _ => "📣 <b>🔵 CẬP NHẬT TICKET</b>"
         });
@@ -42,9 +40,20 @@ public static partial class NotificationFormatter
         var shouldShowStatus = item.EventType is not (TicketEventType.UnassignedReminder or TicketEventType.ResponseReminder) &&
             (item.EventType != TicketEventType.Created || ticket.Status != TicketStatus.New);
         if (shouldShowStatus)
-            text.AppendLine(isStatusTransition
-                ? $"📌 <b>Trạng thái:</b> {Escape(item.PreviousStatus!.Value.DisplayName())} ➔ {Escape(ticket.Status.DisplayName())}"
-                : $"📌 <b>Trạng thái:</b> {Escape(ticket.Status.DisplayName())}");
+        {
+            if (item.EventType == TicketEventType.EmailReceived)
+            {
+                text.AppendLine($"📌 <b>Trạng thái hiện tại:</b> {Escape(ticket.Status.DisplayName())}");
+            }
+            else if (isStatusTransition)
+            {
+                text.AppendLine($"📌 <b>Chuyển trạng thái:</b> {Escape(item.PreviousStatus!.Value.DisplayName())} ➔ {Escape(ticket.Status.DisplayName())}");
+            }
+            else
+            {
+                text.AppendLine($"📌 <b>Trạng thái:</b> {Escape(ticket.Status.DisplayName())}");
+            }
+        }
         if (isStatusTransition && !string.IsNullOrWhiteSpace(item.ChangedBy) && item.ChangedBy.Trim() != "---")
             text.AppendLine($"👤 <b>Người thực hiện:</b> {Escape(item.ChangedBy.Trim())}");
         if (!string.IsNullOrWhiteSpace(item.Note))
@@ -52,10 +61,9 @@ public static partial class NotificationFormatter
         else if (!string.IsNullOrWhiteSpace(item.Reason) &&
             !string.Equals(item.Reason, "Trạng thái ticket đã thay đổi", StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(item.Reason, "Người xử lý hoặc phòng ban đã thay đổi", StringComparison.OrdinalIgnoreCase) &&
-            !item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) &&
             !item.Reason.Contains("Phát hiện ticket mới", StringComparison.OrdinalIgnoreCase) &&
             item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal)
-            text.AppendLine($"📝 <b>Ghi chú:</b> {Escape(item.Reason.Trim())}");
+            text.AppendLine($"📝 <b>Lý do:</b> {Escape(item.Reason.Trim())}");
         var shouldShowAssignee = item.EventType is not (TicketEventType.AssignmentChanged or TicketEventType.UnassignedReminder or TicketEventType.ResponseReminder) &&
             (item.EventType != TicketEventType.Created || (!string.IsNullOrWhiteSpace(ticket.AssigneeName) && ticket.AssigneeName.Trim() != "---" && ticket.AssigneeName.Trim() != "Chưa nhận"));
         if (shouldShowAssignee)
@@ -81,7 +89,20 @@ public static partial class NotificationFormatter
         DateTimeOffset? changeTime = item.ChangedAt ?? ticket.UpdatedAt ??
             (item.EventType == TicketEventType.EmailReceived ? email?.SentAt : null) ?? item.DetectedAt;
         if (shouldShowChangeTime && changeTime is not null)
-            text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value)}");
+        {
+            if (item.EventType == TicketEventType.EmailReceived)
+            {
+                text.AppendLine($"📩 <b>Thời gian gửi email:</b> {FormatVietnamTime(email?.SentAt ?? item.DetectedAt)}");
+            }
+            else if (item.EventType == TicketEventType.StatusChanged)
+            {
+                text.AppendLine($"🗓 <b>Thời gian đổi trạng thái:</b> {FormatVietnamTime(changeTime.Value)}");
+            }
+            else
+            {
+                text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value)}");
+            }
+        }
         if (item.EventType == TicketEventType.AssignmentChanged)
         {
             if (AssigneeChanged(item))
@@ -103,7 +124,8 @@ public static partial class NotificationFormatter
         {
             emailBody = email.Body.Trim();
         }
-        var shouldRenderBlockquote = email is not null &&
+        var shouldRenderBlockquote = item.EventType is not (TicketEventType.StatusChanged or TicketEventType.AssignmentChanged or TicketEventType.SlaThresholdReached) &&
+            email is not null &&
             (!string.IsNullOrWhiteSpace(emailBody) || !string.IsNullOrWhiteSpace(email.From) || email.SentAt is not null || !string.IsNullOrWhiteSpace(originalTicketTitle));
         if (shouldRenderBlockquote)
         {

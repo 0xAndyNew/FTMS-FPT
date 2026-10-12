@@ -255,12 +255,12 @@ public sealed class TelegramOutboxSender(
                 return false;
         }
 
-        if (Regex.IsMatch(decodedMessage, @"Trạng thái:</b>\s*(?:[^\r\n]*➔\s*)?(?:Đang thực hiện|Tạm ngưng|Hoàn thành|Đã đóng|Đã hủy|Không xử lý)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(decodedMessage, @"(?:Trạng thái|Chuyển trạng thái|Trạng thái hiện tại):</b>\s*(?:[^\r\n]*➔\s*)?(?:Đang thực hiện|Tạm ngưng|Hoàn thành|Đã đóng|Đã hủy|Không xử lý)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase))
             return false;
 
         return decodedMessage.Contains("Ticket mới", StringComparison.OrdinalIgnoreCase) ||
             decodedMessage.Contains("Nhắc ticket chưa được nhận", StringComparison.OrdinalIgnoreCase) ||
-            Regex.IsMatch(decodedMessage, @"Trạng thái:</b>\s*(?:[^\r\n]*➔\s*)?(?:Tạo mới|Phân công)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase);
+            Regex.IsMatch(decodedMessage, @"(?:Trạng thái|Chuyển trạng thái|Trạng thái hiện tại):</b>\s*(?:[^\r\n]*➔\s*)?(?:Tạo mới|Phân công)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase);
     }
 
     public static bool CanPauseTicket(TicketEvent? evt, string decodedMessage, long? currentUserId)

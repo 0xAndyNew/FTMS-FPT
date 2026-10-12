@@ -443,13 +443,22 @@ public sealed class NotificationFormatterEmailTests
 
         var statusEvent = Assert.Single(events, e => e.EventType == TicketEventType.StatusChanged);
         Assert.Equal("101", statusEvent.LatestEmail?.Id);
-        Assert.Equal(newEmail.Body, statusEvent.LatestEmail?.Body);
-        Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
+        var emailEvent = Assert.Single(events, e => e.EventType == TicketEventType.EmailReceived);
+        Assert.Equal("101", emailEvent.LatestEmail?.Id);
+        Assert.Equal(newEmail.Body, emailEvent.LatestEmail?.Body);
 
         var statusMsg = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("From: sender@fpt.com", statusMsg);
-        Assert.Contains("Phản hồi mới của", statusMsg);
-        Assert.Contains("<blockquote>", statusMsg);
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", statusMsg);
+        Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMsg);
+        Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMsg);
+        Assert.DoesNotContain("<blockquote>", statusMsg);
+
+        var emailMsg = NotificationFormatter.Format(emailEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", emailMsg);
+        Assert.Contains("Trạng thái hiện tại:</b> Đang thực hiện", emailMsg);
+        Assert.Contains("From: sender@fpt.com", emailMsg);
+        Assert.Contains("Phản hồi mới của", emailMsg);
+        Assert.Contains("<blockquote>", emailMsg);
     }
 
     [Fact]
@@ -477,12 +486,20 @@ public sealed class NotificationFormatterEmailTests
         Assert.Equal(TicketStatus.Paused, statusEvent.PreviousStatus);
         Assert.Equal(TicketStatus.InProgress, statusEvent.CurrentStatus);
         Assert.Equal("101", statusEvent.LatestEmail?.Id);
-        Assert.Equal(newEmail.Body, statusEvent.LatestEmail?.Body);
-        Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
+
+        var emailEvent = Assert.Single(events, e => e.EventType == TicketEventType.EmailReceived);
+        Assert.Equal("101", emailEvent.LatestEmail?.Id);
+        Assert.Equal(newEmail.Body, emailEvent.LatestEmail?.Body);
 
         var statusMessage = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("Tạm ngưng ➔ Đang thực hiện", statusMessage);
-        Assert.Contains("Phản hồi mới của kh&#225;ch h&#224;ng", statusMessage);
+        Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMessage);
+        Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMessage);
+        Assert.DoesNotContain("<blockquote>", statusMessage);
+
+        var emailMessage = NotificationFormatter.Format(emailEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", emailMessage);
+        Assert.Contains("Phản hồi mới của kh&#225;ch h&#224;ng", emailMessage);
+        Assert.Contains("<blockquote>", emailMessage);
     }
 
     [Fact]
@@ -515,18 +532,26 @@ public sealed class NotificationFormatterEmailTests
 
         var statusEvent = Assert.Single(events, e => e.EventType == TicketEventType.StatusChanged);
         Assert.Equal(1, calls);
-        Assert.Equal("FTMS có email mới", statusEvent.Reason);
+        Assert.Equal("Tự động mở lại do có phản hồi mới", statusEvent.Reason);
         Assert.Equal(newEmail, statusEvent.LatestEmail);
         Assert.Equal(newEmail, statusEvent.Snapshot.LatestEmail);
-        Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
 
-        var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
-        Assert.Contains("From: chiennh29@ghtk.co", message);
-        Assert.Contains("Time: 13:44:09 09/10/2026", message);
-        Assert.Contains(System.Net.WebUtility.HtmlEncode(newEmail.Body!), message);
-        Assert.DoesNotContain("DuyBD4@fpt.com", message);
-        Assert.DoesNotContain(System.Net.WebUtility.HtmlEncode(oldEmail.Body!), message);
+        var emailEvent = Assert.Single(events, e => e.EventType == TicketEventType.EmailReceived);
+        Assert.Equal(newEmail, emailEvent.LatestEmail);
+
+        var statusMessage = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", statusMessage);
+        Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMessage);
+        Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMessage);
+        Assert.DoesNotContain("<blockquote>", statusMessage);
+
+        var emailMessage = NotificationFormatter.Format(emailEvent, "https://ftms.fpt.net/ihub");
+        Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", emailMessage);
+        Assert.Contains("From: chiennh29@ghtk.co", emailMessage);
+        Assert.Contains("Time: 13:44:09 09/10/2026", emailMessage);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(newEmail.Body!), emailMessage);
+        Assert.DoesNotContain("DuyBD4@fpt.com", emailMessage);
+        Assert.DoesNotContain(System.Net.WebUtility.HtmlEncode(oldEmail.Body!), emailMessage);
     }
 
     [Fact]
@@ -560,7 +585,7 @@ public sealed class NotificationFormatterEmailTests
         Assert.DoesNotContain(events, e => e.EventType == TicketEventType.EmailReceived);
 
         var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("THAY ĐỔI TRẠNG THÁI", message);
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", message);
         Assert.DoesNotContain("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
     }
 
@@ -595,7 +620,8 @@ public sealed class NotificationFormatterEmailTests
         Assert.Equal("Trạng thái ticket đã thay đổi", statusEvent.Reason);
         Assert.Equal(cachedEmail, statusEvent.LatestEmail);
         var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("From: customer@example.com", message);
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", message);
+        Assert.DoesNotContain("<blockquote>", message);
         Assert.DoesNotContain("fti.sd02@fpt.com", message);
         Assert.DoesNotContain("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
     }
@@ -620,8 +646,8 @@ public sealed class NotificationFormatterEmailTests
         Assert.Equal(TicketStatus.Paused, emailEvent.CurrentStatus);
 
         var message = NotificationFormatter.Format(emailEvent, "https://ftms.fpt.net/ihub");
-        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
-        Assert.Contains("Trạng thái:</b> Tạm ngưng", message);
+        Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", message);
+        Assert.Contains("Trạng thái hiện tại:</b> Tạm ngưng", message);
     }
 
     [Fact]
@@ -705,7 +731,7 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
-    public void NotificationFormatter_StatusChanged_WithEmail_FormatsEmailInBlockquote()
+    public void NotificationFormatter_StatusChanged_WithEmail_DoesNotFormatEmailInBlockquote()
     {
         var email = new LatestEmail("101", new DateTimeOffset(2026, 10, 7, 21, 11, 41, TimeSpan.FromHours(7)),
             "HieuDX2@fpt.com", "Tiêu đề", "<p>Dear anh</p><p>FPT đã hỗ trợ xử lý lỗi anh vui lòng thử lại .</p>");
@@ -736,11 +762,12 @@ public sealed class NotificationFormatterEmailTests
 
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net");
 
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", message);
+        Assert.Contains("Chuyển trạng thái:</b> Đang thực hiện ➔ Tạm ngưng", message);
         Assert.Contains("👤 <b>Người thực hiện:</b> HieuDX2", message);
         Assert.Contains("📝 <b>Ghi chú:</b> Pending Customer", message);
-        Assert.Contains("<blockquote>", message);
-        Assert.Contains("From: HieuDX2@fpt.com", message);
-        Assert.Contains(System.Net.WebUtility.HtmlEncode("FPT đã hỗ trợ xử lý lỗi"), message);
+        Assert.DoesNotContain("<blockquote>", message);
+        Assert.DoesNotContain("From: HieuDX2@fpt.com", message);
     }
 
     [Fact]
@@ -960,7 +987,7 @@ public sealed class NotificationFormatterEmailTests
 
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
 
-        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+        Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", message);
         Assert.DoesNotContain("EMAIL MỚI CỦA TICKET", message);
     }
 
@@ -986,9 +1013,9 @@ public sealed class NotificationFormatterEmailTests
 
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
 
-        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
-        Assert.Contains("Trạng thái:</b> Đang thực hiện", message);
-        Assert.Contains("Thời gian thay đổi:</b> 09:15:00 08/10/2026", message);
+        Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", message);
+        Assert.Contains("Trạng thái hiện tại:</b> Đang thực hiện", message);
+        Assert.Contains("Thời gian gửi email:</b> 09:14:30 08/10/2026", message);
         Assert.Contains("Time: 09:14:30 08/10/2026", message);
     }
 
@@ -1008,17 +1035,18 @@ public sealed class NotificationFormatterEmailTests
             CurrentStatus = TicketStatus.InProgress,
             DetectedAt = changeAt.AddSeconds(3),
             ChangedAt = changeAt,
-            Reason = "FTMS có email mới",
+            Reason = "Tự động mở lại do có phản hồi mới",
             LatestEmail = email,
             Snapshot = snapshot
         };
 
         var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
 
-        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
-        Assert.Contains("Trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", message);
-        Assert.Contains("Thời gian thay đổi:</b> 09:15:00 08/10/2026", message);
-        Assert.Contains("Time: 09:14:00 08/10/2026", message);
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", message);
+        Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", message);
+        Assert.Contains("Thời gian đổi trạng thái:</b> 09:15:00 08/10/2026", message);
+        Assert.Contains("Lý do:</b> Tự động mở lại do c&#243; phản hồi mới", message);
+        Assert.DoesNotContain("<blockquote>", message);
     }
 
     [Fact]
