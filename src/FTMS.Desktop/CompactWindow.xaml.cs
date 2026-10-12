@@ -34,6 +34,7 @@ public partial class CompactWindow : Window
     private long? _activeAccountId;
     private CurrentUserIdentity? _activeUser;
     private int _visibleNavigationGeneration;
+    private int _hiddenNavigationGeneration;
     private int _hiddenReloadAttempts;
     private bool _monitorStarting;
     private bool _monitorStarted;
@@ -151,9 +152,14 @@ public partial class CompactWindow : Window
             MarkUserActivity();
             _visibleNavigationGeneration++;
             if (!Uri.TryCreate(args.Uri, UriKind.Absolute, out var next) ||
-                !WebViewLoginRecovery.IsFtmsIhubUri(next)) DeactivateAccount();
+                !WebViewLoginRecovery.IsFtmsIhubUri(next))
+            {
+                _visibleIdentityClient?.NotifyTargetReached();
+                DeactivateAccount();
+            }
         };
         FtmsWebView.CoreWebView2.SourceChanged += (_, _) => UpdateCurrentPage();
+        MonitorWebView.CoreWebView2.NavigationStarting += (_, _) => _hiddenNavigationGeneration++;
         MonitorWebView.NavigationCompleted += OnMonitorNavigationCompleted;
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStatusMutationScript.Value);
@@ -306,45 +312,51 @@ public partial class CompactWindow : Window
         if (uri is null) return;
         if (WebViewLoginRecovery.IsFtmsIhubUri(uri))
         {
+            var navigationGeneration = _hiddenNavigationGeneration;
             _ftmsClient.NotifyTargetReached();
             CurrentUserIdentity? hiddenIdentity;
-            try { hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token); }
+            try
+            {
+                if (await _ftmsClient.IsLoginDocumentAsync(_lifetime.Token))
+                {
+                    SetSessionStatus("Đang khôi phục phiên", "#D9A441");
+                    await _ftmsClient.BeginLoginRecoveryAsync(_lifetime.Token);
+                    return;
+                }
+
+                hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token);
+            }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }
+            catch (Exception ex)
+            {
+                MonitorText.Text = $"Giám sát FTMS cần đăng nhập: {ex.Message}";
+                return;
+            }
+            if (navigationGeneration != _hiddenNavigationGeneration) return;
 
             if (hiddenIdentity is not null && hiddenIdentity.UserId > 0)
             {
                 if (_expectedAccountId is null)
                 {
                     _expectedAccountId = hiddenIdentity.UserId;
-                    SetSessionStatus("Đã kết nối", "#4AA47B");
                     UpdateDashboard(new DashboardSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, hiddenIdentity));
-                    _ = FtmsWebView.ExecuteScriptAsync(
-                        $"globalThis.userID = {hiddenIdentity.UserId}; " +
-                        $"globalThis.Username = {JsonSerializer.Serialize(hiddenIdentity.UserName)}; " +
-                        $"globalThis.UserDept = {hiddenIdentity.DepartmentId?.ToString() ?? "null"}; " +
-                        $"globalThis.DepartmentName = {JsonSerializer.Serialize(hiddenIdentity.DepartmentName)};");
                 }
 
                 if (_expectedAccountId == hiddenIdentity.UserId)
                 {
                     _hiddenReloadAttempts = 0;
+                    SetSessionStatus("Đã kết nối", "#4AA47B");
                     await StartMonitorOnceAsync(hiddenIdentity.UserId);
                     return;
                 }
             }
 
-            if (_expectedAccountId is not null && hiddenIdentity?.UserId != _expectedAccountId)
-            {
-                if (_hiddenReloadAttempts++ < 2)
-                    MonitorWebView.Source = new Uri(FtmsLegacyUrl);
-                else
-                    MonitorText.Text = "Tài khoản WebView giám sát không khớp; đã tạm dừng để tránh lẫn dữ liệu.";
-                return;
-            }
+            await RecoverMonitorSessionAsync(hiddenIdentity is not null);
             return;
         }
         if (WebViewLoginRecovery.IsLoginUri(uri) || WebViewLoginRecovery.IsAdfsUri(uri))
         {
+            SetSessionStatus("Đang khôi phục phiên", "#D9A441");
             try { await _ftmsClient.BeginLoginRecoveryAsync(_lifetime.Token); }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
             catch (Exception ex) { MonitorText.Text = $"Giám sát FTMS cần đăng nhập: {ex.Message}"; }
@@ -357,27 +369,62 @@ public partial class CompactWindow : Window
         var uri = MonitorWebView.Source;
         if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri))
         {
+            await RecoverMonitorSessionAsync(identityMismatch: false);
+            return;
+        }
+
+        var navigationGeneration = _hiddenNavigationGeneration;
+        CurrentUserIdentity? hiddenIdentity;
+        try
+        {
+            if (await _ftmsClient.IsLoginDocumentAsync(_lifetime.Token))
+            {
+                SetSessionStatus("Đang khôi phục phiên", "#D9A441");
+                await _ftmsClient.BeginLoginRecoveryAsync(_lifetime.Token);
+                return;
+            }
+
+            _ftmsClient.NotifyTargetReached();
+            hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }
+        catch
+        {
+            await RecoverMonitorSessionAsync(identityMismatch: false);
+            return;
+        }
+
+        if (navigationGeneration != _hiddenNavigationGeneration ||
+            _expectedAccountId != expectedAccountId) return;
+        if (hiddenIdentity?.UserId == expectedAccountId)
+        {
+            _hiddenReloadAttempts = 0;
+            SetSessionStatus("Đã kết nối", "#4AA47B");
+            await StartMonitorOnceAsync(expectedAccountId);
+            return;
+        }
+
+        await RecoverMonitorSessionAsync(hiddenIdentity is not null);
+    }
+
+    private async Task RecoverMonitorSessionAsync(bool identityMismatch)
+    {
+        SetSessionStatus("Đang khôi phục phiên", "#D9A441");
+        if (_hiddenReloadAttempts++ < 3)
+        {
+            MonitorText.Text = "Đang khôi phục phiên giám sát FTMS…";
             MonitorWebView.Source = new Uri(FtmsLegacyUrl);
             return;
         }
 
-        CurrentUserIdentity? hiddenIdentity;
-        try { hiddenIdentity = await _ftmsClient.GetCurrentUserAsync(_lifetime.Token); }
-        catch { return; }
+        MonitorText.Text = identityMismatch
+            ? "Tài khoản WebView giám sát không khớp; đã tạm dừng để tránh lẫn dữ liệu."
+            : "Giám sát cần xác thực FTMS; hãy đăng nhập ở trang FTMS đang hiển thị.";
+        if (identityMismatch || _ftmsClient is null) return;
 
-        if (_expectedAccountId != expectedAccountId) return;
-        if (hiddenIdentity?.UserId == expectedAccountId)
-        {
-            _hiddenReloadAttempts = 0;
-            await StartMonitorOnceAsync(expectedAccountId);
-        }
-        else
-        {
-            if (_hiddenReloadAttempts++ < 3)
-                MonitorWebView.Source = new Uri(FtmsLegacyUrl);
-            else
-                MonitorText.Text = "Tài khoản WebView giám sát không khớp; đã tạm dừng để tránh lẫn dữ liệu.";
-        }
+        try { await _ftmsClient.BeginLoginRecoveryAsync(_lifetime.Token); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception ex) { MonitorText.Text = $"Giám sát FTMS cần đăng nhập: {ex.Message}"; }
     }
 
     private async void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
@@ -395,9 +442,21 @@ public partial class CompactWindow : Window
         {
             var uri = FtmsWebView.Source;
             if (uri is null) return;
+            var navigationGeneration = _visibleNavigationGeneration;
 
             if (WebViewLoginRecovery.IsFtmsIhubUri(uri))
             {
+                _visibleIdentityClient!.NotifyTargetReached();
+                var authenticated = await _visibleIdentityClient.IsAuthenticatedAsync(_lifetime.Token);
+                if (navigationGeneration != _visibleNavigationGeneration) return;
+                if (!authenticated)
+                {
+                    _wasLoggingIn = true;
+                    SetSessionStatus("Đang đăng nhập", "#D9A441");
+                    await _displayLoginRecovery.BeginAsync(_lifetime.Token);
+                    return;
+                }
+
                 var wasLoggingIn = _wasLoggingIn ||
                     _displayLoginRecovery.State is LoginRecoveryState.FindingLoginMethod
                         or LoginRecoveryState.FollowingSso
@@ -413,8 +472,6 @@ public partial class CompactWindow : Window
                 UpdateCurrentPage();
                 _manualLoginNotificationShown = false;
                 _displayLoginRecovery.NotifyTargetReached();
-                _visibleIdentityClient!.NotifyTargetReached();
-                var navigationGeneration = _visibleNavigationGeneration;
                 CurrentUserIdentity? visibleIdentity = null;
                 for (var attempt = 0; attempt < 3 && visibleIdentity is null; attempt++)
                 {
@@ -435,18 +492,20 @@ public partial class CompactWindow : Window
                     }
                     return;
                 }
-                SetSessionStatus("Đã kết nối", "#4AA47B");
-                _ = FtmsWebView.ExecuteScriptAsync(
-                    $"globalThis.userID = {visibleIdentity.UserId}; " +
-                    $"globalThis.Username = {JsonSerializer.Serialize(visibleIdentity.UserName)}; " +
-                    $"globalThis.UserDept = {visibleIdentity.DepartmentId?.ToString() ?? "null"}; " +
-                    $"globalThis.DepartmentName = {JsonSerializer.Serialize(visibleIdentity.DepartmentName)};");
+                SetSessionStatus(_monitorStarted && _activeAccountId == visibleIdentity.UserId
+                    ? "Đã kết nối"
+                    : "Đang khôi phục phiên",
+                    _monitorStarted && _activeAccountId == visibleIdentity.UserId ? "#4AA47B" : "#D9A441");
                 if (_expectedAccountId != visibleIdentity.UserId)
                 {
                     DeactivateAccount();
                     UpdateDashboard(new DashboardSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, visibleIdentity));
                     _expectedAccountId = visibleIdentity.UserId;
                     _hiddenReloadAttempts = 0;
+                }
+
+                if (!_monitorStarted || _activeAccountId != visibleIdentity.UserId)
+                {
                     if (MonitorWebView.Source is null ||
                         !WebViewLoginRecovery.IsFtmsIhubUri(MonitorWebView.Source))
                         MonitorWebView.Source = new Uri(FtmsLegacyUrl);

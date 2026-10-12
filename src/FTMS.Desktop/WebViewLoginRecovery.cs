@@ -45,7 +45,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
             var currentUri = await GetCurrentUriAsync(cancellationToken);
             if (currentUri is null || generation != _generation) return;
 
-            if (IsLoginUri(currentUri))
+            if (IsLoginUri(currentUri) || await IsLoginDocumentAsync(cancellationToken))
             {
                 await SelectFptCorporationAsync(generation, cancellationToken);
                 return;
@@ -88,7 +88,9 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
             if (generation != _generation) return;
 
             var currentUri = await GetCurrentUriAsync(cancellationToken);
-            if (currentUri is null || !IsLoginUri(currentUri)) return;
+            if (currentUri is null ||
+                (!IsLoginUri(currentUri) &&
+                 !await IsLoginDocumentAsync(cancellationToken))) return;
 
             var result = await ExecuteScriptAsync(LoginMethodScript, cancellationToken);
             if (generation != _generation) return;
@@ -119,7 +121,9 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
             if (generation != _generation) return;
 
             var currentUri = await GetCurrentUriAsync(cancellationToken);
-            if (currentUri is null || IsFtmsIhubUri(currentUri)) return;
+            if (currentUri is null) return;
+            if (IsFtmsIhubUri(currentUri) &&
+                !await IsLoginDocumentAsync(cancellationToken)) return;
         }
 
         if (generation == _generation)
@@ -149,6 +153,9 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
     private async Task<Uri?> GetCurrentUriAsync(CancellationToken cancellationToken) =>
         await webView.Dispatcher.InvokeAsync(() => webView.Source).Task.WaitAsync(cancellationToken);
 
+    internal async Task<bool> IsLoginDocumentAsync(CancellationToken cancellationToken) =>
+        string.Equals(await ExecuteScriptAsync(LoginDocumentScript, cancellationToken), "login", StringComparison.Ordinal);
+
     private async Task<string> ExecuteScriptAsync(string script, CancellationToken cancellationToken)
     {
         var operation = await webView.Dispatcher.InvokeAsync(() => webView.ExecuteScriptAsync(script)).Task.WaitAsync(cancellationToken);
@@ -175,6 +182,16 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
 
     private static bool IsFtmsHost(Uri uri) =>
         string.Equals(uri.Host, "ftms.fpt.net", StringComparison.OrdinalIgnoreCase);
+
+    private const string LoginDocumentScript = """
+        (() => {
+          const title = String(document.title || '');
+          const hasLoginMethod = Boolean(document.querySelector('.bg-btn.login-method'));
+          return hasLoginMethod || /đăng nhập\s*-\s*FTI Management System/i.test(title)
+            ? 'login'
+            : 'other';
+        })()
+        """;
 
     internal const string LoginMethodScript = """
         (() => {

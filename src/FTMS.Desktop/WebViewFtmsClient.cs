@@ -21,9 +21,21 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     public async Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
     {
         var uri = await webView.Dispatcher.InvokeAsync(() => webView.Source).Task.WaitAsync(cancellationToken);
-        var authenticated = uri is not null && WebViewLoginRecovery.IsFtmsIhubUri(uri);
-        if (!authenticated) InvalidateCurrentUser();
-        return authenticated;
+        if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri))
+        {
+            InvalidateCurrentUser();
+            return false;
+        }
+
+        if (await _loginRecovery.IsLoginDocumentAsync(cancellationToken))
+        {
+            InvalidateCurrentUser();
+            return false;
+        }
+
+        if (await GetCurrentUserAsync(cancellationToken) is not null) return true;
+        InvalidateCurrentUser();
+        return false;
     }
 
     public async Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken)
@@ -93,8 +105,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var error))
         {
             var message = error.GetString() ?? "Không thể đọc API FTMS";
-            if (message.Contains("401", StringComparison.OrdinalIgnoreCase) || message.Contains("403", StringComparison.OrdinalIgnoreCase))
+            if (IsAuthenticationError(message))
+            {
+                InvalidateCurrentUser();
                 throw new UnauthorizedAccessException(message);
+            }
             throw new InvalidOperationException(message);
         }
         return DeserializeTickets(root.GetRawText());
@@ -106,22 +121,57 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         var historyFlag = includeHistory ? "true" : "false";
         return $$"""
             (async () => {
-              const unwrap = (value, depth = 0) => {
-                if (depth > 8 || value == null) return [];
-                if (Array.isArray(value)) return value;
+              const unwrap = (value, depth = 0, allowEmptyArray = depth === 0) => {
+                if (depth > 8 || value == null) return { found: false, rows: [] };
+                if (Array.isArray(value)) return {
+                  found: allowEmptyArray || value.some(x => x && typeof x === 'object'),
+                  rows: value
+                };
                 if (typeof value === 'string') {
-                  try { return unwrap(JSON.parse(value), depth + 1); } catch { return []; }
+                  try { return unwrap(JSON.parse(value), depth + 1, allowEmptyArray); }
+                  catch { return { found: false, rows: [] }; }
                 }
-                if (typeof value !== 'object') return [];
+                if (typeof value !== 'object') return { found: false, rows: [] };
                 for (const key of ['data','Data','rows','Rows','items','Items','result','Result']) {
-                  const rows = unwrap(value[key], depth + 1);
-                  if (rows.length) return rows;
+                  if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+                  const result = unwrap(value[key], depth + 1, true);
+                  if (result.found) return result;
                 }
                 for (const child of Object.values(value)) {
-                  const rows = unwrap(child, depth + 1);
-                  if (rows.some(x => x && typeof x === 'object')) return rows;
+                  const result = unwrap(child, depth + 1, false);
+                  if (result.found) return result;
                 }
-                return [];
+                return { found: false, rows: [] };
+              };
+              const apiMessage = payload => {
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+                const value = payload.message ?? payload.Message ?? payload.error ?? payload.Error ??
+                  payload.errorMessage ?? payload.ErrorMessage ?? payload.exceptionMessage ?? payload.ExceptionMessage;
+                if (value && typeof value === 'object')
+                  return String(value.value ?? value.Value ?? value.message ?? value.Message ?? JSON.stringify(value));
+                return value == null ? '' : String(value);
+              };
+              const apiError = payload => {
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+                const explicitError = payload.error ?? payload.Error ?? payload.errorMessage ?? payload.ErrorMessage ??
+                  payload.exceptionMessage ?? payload.ExceptionMessage;
+                const flag = payload.success ?? payload.Success ?? payload.status ?? payload.Status;
+                const failed = flag === false || flag === 0 || /^(false|fail|failed|error)$/i.test(String(flag ?? ''));
+                const hasError = explicitError != null && explicitError !== false && explicitError !== 0 &&
+                  !/^(|false|0)$/i.test(String(explicitError).trim());
+                const message = apiMessage(payload);
+                const knownError = /không có dữ liệu trả về từ api|có lỗi xảy ra|đăng nhập|\blogin\b|authentication|exception|\berror\b|thất bại/i.test(message);
+                if (!hasError && !failed && !knownError) return '';
+                return message || 'FTMS API báo lỗi';
+              };
+              const readPayload = async response => {
+                const text = await response.text();
+                try { return JSON.parse(text); }
+                catch {
+                  if (/\/id\/login|\/adfs\/|login-method|đăng nhập - FTI Management System/i.test(text))
+                    throw new Error('FTMS API HTTP 401');
+                  throw new Error('FTMS API trả về dữ liệu không hợp lệ');
+                }
               };
               const pick = (row, ...keys) => {
                 for (const key of keys) if (row?.[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
@@ -224,9 +274,14 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
                     throw new Error('FTMS API HTTP 401');
                   if (!response.ok) throw new Error(`FTMS API HTTP ${response.status}`);
-                  const pageRows = unwrap(await response.json());
-                  rows.push(...pageRows);
-                  if (pageRows.length < pageSize) break;
+                  const payload = await readPayload(response);
+                  const message = apiError(payload);
+                  if (message) throw new Error(message);
+                  const page = unwrap(payload);
+                  if (!page.found)
+                    throw new Error(apiMessage(payload) || 'FTMS API không trả về danh sách dữ liệu');
+                  rows.push(...page.rows);
+                  if (page.rows.length < pageSize) break;
                 }
                 return rows;
               };
@@ -240,16 +295,14 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   fetchActiveGroup(statuses, mine)));
                 const rows = [];
                 const errors = [];
-                let anySuccess = false;
                 for (const result of results) {
                   if (result.status === 'fulfilled') {
-                    anySuccess = true;
                     rows.push(...result.value);
                   } else {
                     errors.push(String(result.reason?.message || result.reason || ''));
                   }
                 }
-                if (!anySuccess) throw new Error(errors.join('; ') || 'Không thể đọc danh sách ticket FTMS');
+                if (errors.length) throw new Error(errors.join('; ') || 'Không thể đọc đầy đủ danh sách ticket FTMS');
 
                 const tickets = rows.map(row => ({
                   code: String(pick(row, 'code','Code','requestCode','RequestCode','REQUEST_CODE','REQUESTCODE','requestNo','RequestNo') || '').trim(),
@@ -330,9 +383,13 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     if (/\/id\/login|\/adfs\//i.test(new URL(historyResponse.url).pathname))
                       throw new Error('FTMS history HTTP 401');
                     if (!historyResponse.ok) throw new Error(`FTMS history HTTP ${historyResponse.status}`);
-                    const historyPayload = await historyResponse.json();
-                    const historyRows = unwrap(historyPayload);
-                    if (!Array.isArray(historyRows)) throw new Error('FTMS history JSON không có danh sách dữ liệu');
+                    const historyPayload = await readPayload(historyResponse);
+                    const historyMessage = apiError(historyPayload);
+                    if (historyMessage) throw new Error(historyMessage);
+                    const historyPage = unwrap(historyPayload);
+                    if (!historyPage.found)
+                      throw new Error(apiMessage(historyPayload) || 'FTMS history JSON không có danh sách dữ liệu');
+                    const historyRows = historyPage.rows;
                     if (!historyRows.length) break;
                     const pageKey = historyRows.map(row => String(pick(row, 'id','Id','code','Code','requestCode','RequestCode') || '')).join('|');
                     if (seenPageKeys.has(pageKey)) break;
@@ -374,19 +431,17 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
                 const results = await Promise.allSettled(['6', '5'].map(fetchStatusHistory));
                 const closed = [];
-                let anySuccess = false;
                 const errors = [];
                 for (let i = 0; i < results.length; i++) {
                   const r = results[i];
                   if (r.status === 'fulfilled') {
-                    anySuccess = true;
                     closed.push(...r.value);
                   } else {
                     errors.push(String(r.reason?.message || r.reason));
                   }
                 }
-                if (!anySuccess) {
-                  throw new Error(errors.join('; ') || 'Không thể đọc lịch sử đóng ticket FTMS');
+                if (errors.length) {
+                  throw new Error(errors.join('; ') || 'Không thể đọc đầy đủ lịch sử đóng ticket FTMS');
                 }
                 return closed;
               };
@@ -1482,11 +1537,21 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
     public bool IsTargetUri(Uri uri) => _loginRecovery.IsTargetUri(uri);
 
+    internal Task<bool> IsLoginDocumentAsync(CancellationToken cancellationToken) =>
+        _loginRecovery.IsLoginDocumentAsync(cancellationToken);
+
     private void InvalidateCurrentUser()
     {
         _identityGeneration++;
         _currentUser = null;
     }
+
+    private static bool IsAuthenticationError(string message) =>
+        message.Contains("401", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("403", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("đăng nhập", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("login", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("authentication", StringComparison.OrdinalIgnoreCase);
 
     private static CurrentUserIdentity? DeserializeCurrentUser(string json)
     {
@@ -1544,10 +1609,6 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   deptId = udeptM ? Number(udeptM[1]) : null;
                   deptName = dnameM ? dnameM[1] : null;
                   if (Number.isInteger(userId) && userId > 0) {
-                    globalThis.userID = userId;
-                    if (userName) globalThis.Username = userName;
-                    if (Number.isFinite(deptId)) globalThis.UserDept = deptId;
-                    if (deptName) globalThis.DepartmentName = deptName;
                     return JSON.stringify({
                       userId,
                       userName: text(userName),
@@ -1596,10 +1657,6 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   deptId = udeptM ? Number(udeptM[1]) : null;
                   deptName = dnameM ? dnameM[1] : null;
                   if (Number.isInteger(userId) && userId > 0) {
-                    globalThis.userID = userId;
-                    if (userName) globalThis.Username = userName;
-                    if (Number.isFinite(deptId)) globalThis.UserDept = deptId;
-                    if (deptName) globalThis.DepartmentName = deptName;
                     return JSON.stringify({
                       userId,
                       userName: text(userName),
@@ -1697,23 +1754,29 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
     private static IReadOnlyList<TicketSnapshot> DeserializeTickets(string json)
     {
-        if (string.IsNullOrWhiteSpace(json) || json == "null") return [];
+        if (string.IsNullOrWhiteSpace(json))
+            throw new InvalidOperationException("FTMS API không trả về dữ liệu.");
+
         try
         {
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
-            if (root.ValueKind == JsonValueKind.String) return DeserializeTickets(root.GetString() ?? "null");
+            if (root.ValueKind == JsonValueKind.String)
+                return DeserializeTickets(root.GetString() ?? string.Empty);
             if (root.ValueKind == JsonValueKind.Array)
                 return JsonSerializer.Deserialize<List<TicketSnapshot>>(root.GetRawText(), JsonOptions) ?? [];
-            if (root.ValueKind == JsonValueKind.Object)
+            if (root.ValueKind == JsonValueKind.Object &&
+                (root.TryGetProperty("data", out var data) || root.TryGetProperty("Data", out data)) &&
+                data.ValueKind == JsonValueKind.Array)
             {
-                if (root.TryGetProperty("data", out var data) || root.TryGetProperty("Data", out data))
-                    return data.ValueKind == JsonValueKind.Array
-                        ? JsonSerializer.Deserialize<List<TicketSnapshot>>(data.GetRawText(), JsonOptions) ?? []
-                        : [];
+                return JsonSerializer.Deserialize<List<TicketSnapshot>>(data.GetRawText(), JsonOptions) ?? [];
             }
         }
-        catch (JsonException) { }
-        return [];
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("FTMS API trả về JSON không hợp lệ.", ex);
+        }
+
+        throw new InvalidOperationException("FTMS API không trả về danh sách dữ liệu.");
     }
 }

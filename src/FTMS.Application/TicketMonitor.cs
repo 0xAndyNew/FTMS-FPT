@@ -82,7 +82,6 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 {
                     if (!await client.IsAuthenticatedAsync(cancellationToken))
                     {
-                        SummaryChanged?.Invoke(UnavailableSummary());
                         await client.BeginLoginRecoveryAsync(cancellationToken);
                     }
                     else
@@ -93,7 +92,6 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
                 catch (UnauthorizedAccessException)
                 {
-                    SummaryChanged?.Invoke(UnavailableSummary());
                     await client.BeginLoginRecoveryAsync(cancellationToken);
                 }
                 catch (Exception ex) { StatusChanged?.Invoke($"Loi: {ex.Message}"); }
@@ -851,5 +849,4 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             : normalized.ToUpperInvariant();
     }
 
-    private static DashboardSummary UnavailableSummary() => new(0, 0, 0, 0, 0, 0, 0, 0, 0);
 }
