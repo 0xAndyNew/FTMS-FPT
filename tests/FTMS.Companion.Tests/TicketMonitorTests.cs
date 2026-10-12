@@ -848,6 +848,99 @@ public sealed class TicketMonitorTests
         Assert.Contains("Đang thực hiện ➔ Tạm ngưng", message);
     }
 
+    [Fact]
+    public async Task Poll_UnpausingEmail_ArmsResponseReminderAndFiresAtFiveMinutes()
+    {
+        var sentAt = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).AddMinutes(-6);
+        var oldEmail = new LatestEmail("1001", sentAt.AddHours(-2), "customer@example.com", "Tiêu đề cũ", "Nội dung cũ");
+        var newEmail = new LatestEmail("1002", sentAt, "customer@example.com", "Tiêu đề phản hồi", "Khách hàng phản hồi mở lại ticket");
+
+        var paused = new TicketSnapshot
+        {
+            Code = "RQ-UNPAUSE-REMINDER",
+            Status = TicketStatus.Paused,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            LatestEmail = oldEmail,
+            CreatedAt = sentAt.AddHours(-3),
+            UpdatedAt = sentAt.AddHours(-1)
+        };
+        var resumed = paused with
+        {
+            Status = TicketStatus.InProgress,
+            UpdatedAt = sentAt
+        };
+
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", null, null), [resumed])
+        {
+            LatestEmail = newEmail
+        };
+        var store = new MemoryStore();
+        store.InitialSnapshots[paused.Code] = paused;
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Transition from Paused to InProgress with new email should arm ResponseReminder
+        var activeSnapshot = monitor.GetActiveSnapshots().Single(s => s.Code == paused.Code);
+        Assert.Equal("1002", activeSnapshot.ResponseReminderEmailId);
+        Assert.Equal(sentAt, activeSnapshot.ResponseReminderSince);
+
+        // Next poll: 6 minutes have passed since sentAt -> should fire ResponseReminder at 5-minute milestone
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var reminder = Assert.Single(store.SavedEvents, e => e.TicketCode == paused.Code && e.EventType == TicketEventType.ResponseReminder);
+        Assert.Contains("6 phút", reminder.Reason);
+        Assert.Contains((paused.Code, "ResponseReminder", "response-1002-1"), store.RecordedNotifications);
+
+        var reminderMsg = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", reminderMsg);
+        Assert.Contains("Thời gian từ lúc có phản hồi mới:</b> 6 phút", reminderMsg);
+    }
+
+    [Fact]
+    public async Task Poll_SubsequentEmailOnSameTicket_DoesNotGetBlockedByLedgerOfFirstEmail()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var ticketCode = "RQ-MULTI-EMAIL";
+        var email1 = new LatestEmail("2001", vnNow.AddHours(-2), "customer@example.com", "Email 1", "Nội dung 1");
+        var email2 = new LatestEmail("2002", vnNow.AddMinutes(-7), "customer@example.com", "Email 2", "Nội dung 2");
+
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", null, null), []);
+        var store = new MemoryStore();
+
+        // Simulate that email 1 already triggered and recorded milestone 1 in ledger
+        await store.RecordNotificationAsync(ticketCode, "ResponseReminder", "response-2001-1", CancellationToken.None);
+
+        var tracked = new TicketSnapshot
+        {
+            Code = ticketCode,
+            Status = TicketStatus.InProgress,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            LatestEmail = email2,
+            ResponseReminderEmailId = email2.Id,
+            ResponseReminderSince = email2.SentAt
+        };
+        client.CurrentTickets = [tracked];
+        store.InitialSnapshots[ticketCode] = tracked;
+
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Because discriminator is "response-2002-1" and NOT "response-2001-1", it must NOT be blocked!
+        var reminder = Assert.Single(store.SavedEvents, e => e.TicketCode == ticketCode && e.EventType == TicketEventType.ResponseReminder);
+        Assert.Contains("7 phút", reminder.Reason);
+        Assert.Contains((ticketCode, "ResponseReminder", "response-2002-1"), store.RecordedNotifications);
+    }
+
     private static TicketSnapshot Closed(string code, DateTimeOffset closedAt, long? closedById,
         string? closedByName, long? assigneeId) => new()
     {
@@ -962,9 +1055,15 @@ public sealed class TicketMonitorTests
                 .Select(item => item.Message!));
             return Task.CompletedTask;
         }
+        public HashSet<(string Code, string Type, string Disc)> RecordedNotifications { get; } = [];
         public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.FromResult(false);
-        public Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) =>
+            Task.FromResult(RecordedNotifications.Contains((ticketCode, notificationType, discriminator)));
+        public Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken)
+        {
+            RecordedNotifications.Add((ticketCode, notificationType, discriminator));
+            return Task.CompletedTask;
+        }
         public Task CleanupAsync(int retentionDays, CancellationToken cancellationToken)
         {
             CleanupCallCount++;

@@ -129,7 +129,7 @@ public sealed record AppSettings
     public int[] SlaThresholds { get; init; } = [5, 3, 1];
     public int TerminalRetentionDays { get; init; } = 1;
     public bool UnprocessedIsTerminal { get; init; } = true;
-    public int HistoryIntervalSeconds { get; init; } = 60;
+    public int HistoryIntervalSeconds { get; init; } = 15;
 }
 
 public sealed record CurrentUserIdentity(long UserId, string? UserName, long? DepartmentId, string? DepartmentName);

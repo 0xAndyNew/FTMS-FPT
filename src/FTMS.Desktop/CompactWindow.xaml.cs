@@ -598,7 +598,7 @@ public partial class CompactWindow : Window
         {
             var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
             var databasePath = Path.Combine(root, $"ftms-user-{accountId}.db");
-            var settings = new AppSettings { FtmsUrl = FtmsLegacyUrl, PollIntervalSeconds = 2, IdleDelaySeconds = 0 };
+            var settings = new AppSettings { FtmsUrl = FtmsLegacyUrl, PollIntervalSeconds = 2, IdleDelaySeconds = 0, HistoryIntervalSeconds = 15 };
             var telegram = new TelegramOutboxSender(databasePath,
                 () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _http,
                 getCurrentUserId: () => _activeAccountId);

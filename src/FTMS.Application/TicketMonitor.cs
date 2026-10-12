@@ -680,18 +680,29 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 if (enriched is not null)
                 {
                     var previousEmail = previousSnapshots.GetValueOrDefault(evt.TicketCode)?.LatestEmail;
+                    var isNewResponse = isResponseTransition && TicketChangeDetector.IsNewEmail(previousEmail, enriched);
                     criticalList[i] = evt with
                     {
-                        Reason = isResponseTransition && TicketChangeDetector.IsNewEmail(previousEmail, enriched)
+                        Reason = isNewResponse
                             ? "FTMS có email mới"
                             : evt.Reason,
                         LatestEmail = enriched,
-                        Snapshot = evt.Snapshot with { LatestEmail = enriched }
+                        Snapshot = evt.Snapshot with
+                        {
+                            LatestEmail = enriched,
+                            ResponseReminderEmailId = isNewResponse ? enriched.Id : evt.Snapshot.ResponseReminderEmailId,
+                            ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : evt.Snapshot.ResponseReminderSince
+                        }
                     };
                     var matchingTicketIdx = tickets.FindIndex(t => string.Equals(t.Code, evt.TicketCode, StringComparison.OrdinalIgnoreCase));
                     if (matchingTicketIdx >= 0)
                     {
-                        tickets[matchingTicketIdx] = tickets[matchingTicketIdx] with { LatestEmail = enriched };
+                        tickets[matchingTicketIdx] = tickets[matchingTicketIdx] with
+                        {
+                            LatestEmail = enriched,
+                            ResponseReminderEmailId = isNewResponse ? enriched.Id : tickets[matchingTicketIdx].ResponseReminderEmailId,
+                            ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : tickets[matchingTicketIdx].ResponseReminderSince
+                        };
                     }
                 }
             }
@@ -744,8 +755,15 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             else if (item.EventType == TicketEventType.ResponseReminder)
             {
                 var minuteMatch = System.Text.RegularExpressions.Regex.Match(item.Reason, @"(\d+) phút");
+                var emailId = !string.IsNullOrWhiteSpace(item.Snapshot.ResponseReminderEmailId)
+                    ? item.Snapshot.ResponseReminderEmailId
+                    : item.LatestEmail?.Id;
                 ledgerType = "ResponseReminder";
-                ledgerDisc = minuteMatch.Success ? $"response-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
+                ledgerDisc = minuteMatch.Success
+                    ? (!string.IsNullOrWhiteSpace(emailId)
+                        ? $"response-{emailId}-{int.Parse(minuteMatch.Groups[1].Value) / 5}"
+                        : $"response-{int.Parse(minuteMatch.Groups[1].Value) / 5}")
+                    : "";
                 if (await store.HasNotificationAsync(item.TicketCode, ledgerType, ledgerDisc, cancellationToken))
                     continue;
             }
