@@ -451,7 +451,7 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", statusMsg);
         Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMsg);
         Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMsg);
-        Assert.DoesNotContain("<blockquote>", statusMsg);
+        Assert.Contains("<blockquote>", statusMsg);
 
         var emailMsg = NotificationFormatter.Format(emailEvent, "https://ftms.fpt.net/ihub");
         Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", emailMsg);
@@ -494,7 +494,7 @@ public sealed class NotificationFormatterEmailTests
         var statusMessage = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
         Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMessage);
         Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMessage);
-        Assert.DoesNotContain("<blockquote>", statusMessage);
+        Assert.Contains("<blockquote>", statusMessage);
 
         var emailMessage = NotificationFormatter.Format(emailEvent, "https://ftms.fpt.net/ihub");
         Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", emailMessage);
@@ -543,7 +543,7 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", statusMessage);
         Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMessage);
         Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMessage);
-        Assert.DoesNotContain("<blockquote>", statusMessage);
+        Assert.Contains("<blockquote>", statusMessage);
 
         var emailMessage = NotificationFormatter.Format(emailEvent, "https://ftms.fpt.net/ihub");
         Assert.Contains("CÓ EMAIL PHẢN HỒI MỚI", emailMessage);
@@ -621,7 +621,8 @@ public sealed class NotificationFormatterEmailTests
         Assert.Equal(cachedEmail, statusEvent.LatestEmail);
         var message = NotificationFormatter.Format(statusEvent, "https://ftms.fpt.net/ihub");
         Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", message);
-        Assert.DoesNotContain("<blockquote>", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains("customer@example.com", message);
         Assert.DoesNotContain("fti.sd02@fpt.com", message);
         Assert.DoesNotContain("TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
     }
@@ -731,7 +732,7 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
-    public void NotificationFormatter_StatusChanged_WithEmail_DoesNotFormatEmailInBlockquote()
+    public void NotificationFormatter_StatusChanged_WithEmail_FormatsEmailInBlockquote()
     {
         var email = new LatestEmail("101", new DateTimeOffset(2026, 10, 7, 21, 11, 41, TimeSpan.FromHours(7)),
             "HieuDX2@fpt.com", "Tiêu đề", "<p>Dear anh</p><p>FPT đã hỗ trợ xử lý lỗi anh vui lòng thử lại .</p>");
@@ -766,8 +767,9 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("Chuyển trạng thái:</b> Đang thực hiện ➔ Tạm ngưng", message);
         Assert.Contains("👤 <b>Người thực hiện:</b> HieuDX2", message);
         Assert.Contains("📝 <b>Ghi chú:</b> Pending Customer", message);
-        Assert.DoesNotContain("<blockquote>", message);
-        Assert.DoesNotContain("From: HieuDX2@fpt.com", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains("From: HieuDX2@fpt.com", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode("FPT đã hỗ trợ xử lý lỗi anh vui lòng thử lại"), message);
     }
 
     [Fact]
@@ -1046,7 +1048,7 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", message);
         Assert.Contains("Thời gian đổi trạng thái:</b> 09:15:00 08/10/2026", message);
         Assert.Contains("Lý do:</b> Tự động mở lại do c&#243; phản hồi mới", message);
-        Assert.DoesNotContain("<blockquote>", message);
+        Assert.Contains("<blockquote>", message);
     }
 
     [Fact]
@@ -1198,6 +1200,69 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("<blockquote>", message);
         Assert.Contains("From: vinhnt93@fpt.com", message);
         Assert.Contains(System.Net.WebUtility.HtmlEncode("Nhờ TOC hỗ trợ vào DC kiểm tra rack"), message);
+    }
+
+    [Fact]
+    public void CleanEmail_WhenGivenNestedDivWrappersAndStyles_NeverReturnsRawHtmlTagsOrStyleContents()
+    {
+        var rawHtml = """
+            <style>
+                .EmojiFont { font-family: "Segoe UI Emoji"; }
+            </style>
+            <div id="x_x_divtagdefaultwrapper" style="font-size: 12pt; color: #000000;">
+                <div id="x_x_Signature">
+                    <span lang="EN-US"><font color="#000000"></font></span>
+                </div>
+            </div>
+            """;
+        var cleaned = NotificationFormatter.CleanEmail(rawHtml);
+        Assert.Empty(cleaned);
+    }
+
+    [Fact]
+    public void CleanEmail_WhenGivenEntityEncodedHtml_ProperlyDecodesAndStripsTags()
+    {
+        var rawHtml = "&lt;style&gt;.test{color:red;}&lt;/style&gt;&lt;div id=&quot;wrapper&quot;&gt;&lt;p&gt;C&#7847;n h&#7895; tr&#7907; g&#7845;p&lt;/p&gt;&lt;/div&gt;";
+        var cleaned = NotificationFormatter.CleanEmail(rawHtml);
+        Assert.DoesNotContain("<div", cleaned);
+        Assert.DoesNotContain("&lt;div", cleaned);
+        Assert.DoesNotContain("color:red", cleaned);
+        Assert.Contains("Cần hỗ trợ gấp", cleaned);
+    }
+
+    [Fact]
+    public void Format_WhenEmailContainsOnlyEmptyHtmlWrappers_NeverOutputsRawHtmlTagsOrLeaksStyles()
+    {
+        var rawHtml = """
+            <style>.EmojiFont { font-family: "Segoe UI Emoji"; }</style>
+            <div id="x_x_divtagdefaultwrapper">
+                <div id="x_x_Signature">
+                    <span lang="EN-US"></span>
+                </div>
+            </div>
+            """;
+        var email = new LatestEmail("301", DateTimeOffset.UtcNow, "customer@example.com", "Hỗ trợ hệ thống", rawHtml);
+        var snapshot = Snapshot("RQ202610129999", TicketStatus.InProgress, email, DateTimeOffset.UtcNow);
+        var evt = new TicketEvent
+        {
+            EventKey = "rq-email-empty-wrapper-test",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.EmailReceived,
+            CurrentStatus = TicketStatus.InProgress,
+            DetectedAt = DateTimeOffset.UtcNow,
+            Reason = "Có email mới",
+            LatestEmail = email,
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.DoesNotContain("x_x_divtagdefaultwrapper", message);
+        Assert.DoesNotContain("EmojiFont", message);
+        Assert.DoesNotContain("<div", message);
+        Assert.DoesNotContain("&lt;div", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains("From: customer@example.com", message);
     }
 
     private static LatestEmail Email(string id, DateTimeOffset sentAt, string body) =>

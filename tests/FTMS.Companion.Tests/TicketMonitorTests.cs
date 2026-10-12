@@ -411,7 +411,7 @@ public sealed class TicketMonitorTests
         var statusMsg = Assert.Single(store.SavedMessages, m => m.Contains("CHUYỂN TRẠNG THÁI TICKET"));
         Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMsg);
         Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMsg);
-        Assert.DoesNotContain("<blockquote>", statusMsg);
+        Assert.Contains("<blockquote>", statusMsg);
 
         var emailMsg = Assert.Single(store.SavedMessages, m => m.Contains("CÓ EMAIL PHẢN HỒI MỚI"));
         Assert.Contains("From: chiennh29@ghtk.co", emailMsg);

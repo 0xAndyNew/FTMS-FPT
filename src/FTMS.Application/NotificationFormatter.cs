@@ -120,12 +120,7 @@ public static partial class NotificationFormatter
         }
         var originalTicketTitle = string.IsNullOrWhiteSpace(ticket.Title) ? email?.Subject : ticket.Title;
         var emailBody = CleanEmail(email?.Body);
-        if (string.IsNullOrWhiteSpace(emailBody) && !string.IsNullOrWhiteSpace(email?.Body))
-        {
-            emailBody = email.Body.Trim();
-        }
-        var shouldRenderBlockquote = item.EventType is not (TicketEventType.StatusChanged or TicketEventType.AssignmentChanged or TicketEventType.SlaThresholdReached) &&
-            email is not null &&
+        var shouldRenderBlockquote = email is not null &&
             (!string.IsNullOrWhiteSpace(emailBody) || !string.IsNullOrWhiteSpace(email.From) || email.SentAt is not null || !string.IsNullOrWhiteSpace(originalTicketTitle));
         if (shouldRenderBlockquote)
         {
@@ -148,11 +143,29 @@ public static partial class NotificationFormatter
     public static string CleanEmail(string? html)
     {
         if (string.IsNullOrWhiteSpace(html)) return string.Empty;
-        html = LatestMessageHtmlRegex().Split(html, 2)[0];
-        var value = BreakRegex().Replace(html, "\n");
-        value = WebUtility.HtmlDecode(HtmlTagRegex().Replace(value, " "));
-        value = LineWhitespaceRegex().Replace(value, " ");
-        value = MultiLineRegex().Replace(value, "\n").Trim();
+
+        var raw = html;
+        if (raw.Contains("&lt;", StringComparison.OrdinalIgnoreCase) &&
+            raw.Contains("&gt;", StringComparison.OrdinalIgnoreCase))
+        {
+            raw = WebUtility.HtmlDecode(raw);
+        }
+
+        raw = HtmlHeadRegex().Replace(raw, " ");
+        raw = StyleRegex().Replace(raw, " ");
+        raw = ScriptRegex().Replace(raw, " ");
+        raw = XmlRegex().Replace(raw, " ");
+        raw = CommentRegex().Replace(raw, " ");
+
+        var split = LatestMessageHtmlRegex().Split(raw, 2);
+        var candidateHtml = split[0];
+        var value = StripHtml(candidateHtml);
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            value = StripHtml(raw);
+        }
+
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
 
         var fallbackClean = value;
@@ -232,11 +245,32 @@ public static partial class NotificationFormatter
         if (string.IsNullOrWhiteSpace(value) && !string.IsNullOrWhiteSpace(fallbackClean))
             value = fallbackClean;
 
+        if (value.Contains('<') && value.Contains('>'))
+        {
+            value = HtmlTagRegex().Replace(value, " ");
+            value = LineWhitespaceRegex().Replace(value, " ");
+            value = MultiLineRegex().Replace(value, "\n").Trim();
+        }
+
         // Telegram limit is 4096 chars per message; allow up to 3500 chars for body alone
         if (value.Length > 3500)
             value = value[..3500] + "...";
 
         return value;
+    }
+
+    private static string StripHtml(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return string.Empty;
+        var value = BreakRegex().Replace(html, "\n");
+        value = HtmlTagRegex().Replace(value, " ");
+        value = WebUtility.HtmlDecode(value);
+        if (value.Contains('<') && value.Contains('>'))
+        {
+            value = HtmlTagRegex().Replace(value, " ");
+        }
+        value = LineWhitespaceRegex().Replace(value, " ");
+        return MultiLineRegex().Replace(value, "\n").Trim();
     }
 
     private static string Escape(string? value) => WebUtility.HtmlEncode(value ?? string.Empty);
@@ -274,7 +308,17 @@ public static partial class NotificationFormatter
 
     [GeneratedRegex("<[^>]+>")]
     private static partial Regex HtmlTagRegex();
-    [GeneratedRegex(@"<hr\b[^>]*tabindex\s*=\s*['""]?-1|<hr\b[^>]*id\s*=\s*['""]?(?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]?|<(?:div|span|p)\b[^>]*id\s*=\s*['""](?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"<head\b[^>]*>[\s\S]*?</head>", RegexOptions.IgnoreCase)]
+    private static partial Regex HtmlHeadRegex();
+    [GeneratedRegex(@"<style\b[^>]*>[\s\S]*?</style>", RegexOptions.IgnoreCase)]
+    private static partial Regex StyleRegex();
+    [GeneratedRegex(@"<script\b[^>]*>[\s\S]*?</script>", RegexOptions.IgnoreCase)]
+    private static partial Regex ScriptRegex();
+    [GeneratedRegex(@"<xml\b[^>]*>[\s\S]*?</xml>", RegexOptions.IgnoreCase)]
+    private static partial Regex XmlRegex();
+    [GeneratedRegex(@"<!--[\s\S]*?-->")]
+    private static partial Regex CommentRegex();
+    [GeneratedRegex(@"<hr\b[^>]*tabindex\s*=\s*['""]?-1|<hr\b[^>]*id\s*=\s*['""]?(?:(?:x_)*divRplyFwdMsg|(?:x_)*appendonsend)['""]?|<(?:div|span|p)\b[^>]*id\s*=\s*['""](?:(?:x_)*divRplyFwdMsg|(?:x_)*appendonsend)['""]", RegexOptions.IgnoreCase)]
     private static partial Regex LatestMessageHtmlRegex();
     [GeneratedRegex(@"<br\s*/?>|</?(?:p|div|tr|li|blockquote|h[1-6])\b[^>]*>|</(?:td|th)>", RegexOptions.IgnoreCase)]
     private static partial Regex BreakRegex();
