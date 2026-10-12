@@ -737,6 +737,117 @@ public sealed class TicketMonitorTests
         try { await runTask; } catch (OperationCanceledException) { }
     }
 
+    [Fact]
+    public async Task TicketCreatedToday_WhenObservedFirstTimeAsInProgress_EmitsCreatedEvent()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var todayTicket = new TicketSnapshot
+        {
+            Code = $"RQ{vnNow:yyyyMMdd}0045",
+            Status = TicketStatus.InProgress,
+            Title = "Ticket tạo hôm nay nhưng đã InProgress trong thời gian tắt app",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            CreatedAt = vnNow.AddMinutes(-30),
+            UpdatedAt = vnNow.AddMinutes(-10)
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", 86016, todayTicket.DepartmentName), [todayTicket]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var createdEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == todayTicket.Code && e.EventType == TicketEventType.Created);
+        Assert.Equal(TicketStatus.InProgress, createdEvent.Snapshot.Status);
+        Assert.Equal(2962, createdEvent.Snapshot.AssigneeId);
+        Assert.Equal("HieuDX2", createdEvent.Snapshot.AssigneeName);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET MỚI", message);
+        Assert.Contains("Trạng thái:</b> Đang thực hiện", message);
+        Assert.Contains("Người xử lý:</b> HieuDX2", message);
+    }
+
+    [Fact]
+    public async Task TicketCreatedToday_WhenObservedFirstTimeAsPaused_EmitsCreatedEvent()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var todayPaused = new TicketSnapshot
+        {
+            Code = $"RQ{vnNow:yyyyMMdd}0050",
+            Status = TicketStatus.Paused,
+            Title = "Ticket tạo hôm nay nhưng đã tạm ngưng",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            CreatedAt = vnNow.AddMinutes(-20),
+            UpdatedAt = vnNow.AddMinutes(-5)
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", 86016, todayPaused.DepartmentName), [todayPaused]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var createdEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == todayPaused.Code && e.EventType == TicketEventType.Created);
+        Assert.Equal(TicketStatus.Paused, createdEvent.Snapshot.Status);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET MỚI", message);
+        Assert.Contains("Trạng thái:</b> Tạm ngưng", message);
+        Assert.Contains("Người xử lý:</b> HieuDX2", message);
+    }
+
+    [Fact]
+    public async Task TicketCreatedYesterday_WhenObservedFirstTimeAsInProgress_DoesNotEmitCreated_EmitsStatusChangedWhenResumed()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var yesterday = vnNow.AddDays(-1);
+        var yesterdayTicket = new TicketSnapshot
+        {
+            Code = $"RQ{yesterday:yyyyMMdd}0099",
+            Status = TicketStatus.InProgress,
+            Title = "Ticket từ hôm trước đang InProgress khi cold start",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            CreatedAt = yesterday,
+            UpdatedAt = vnNow.AddHours(-2)
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", 86016, yesterdayTicket.DepartmentName), [yesterdayTicket]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Cold start of older InProgress ticket must be baselined: NO Created event emitted
+        Assert.Empty(store.SavedEvents);
+        Assert.Empty(store.SavedMessages);
+
+        // Subsequent poll: status changes to Paused -> MUST emit StatusChanged
+        var pausedTicket = yesterdayTicket with
+        {
+            Status = TicketStatus.Paused,
+            UpdatedAt = vnNow
+        };
+        client.CurrentTickets = [pausedTicket];
+
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var statusEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == yesterdayTicket.Code);
+        Assert.Equal(TicketEventType.StatusChanged, statusEvent.EventType);
+        Assert.Equal(TicketStatus.InProgress, statusEvent.PreviousStatus);
+        Assert.Equal(TicketStatus.Paused, statusEvent.CurrentStatus);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("THAY ĐỔI TRẠNG THÁI", message);
+        Assert.Contains("Đang thực hiện ➔ Tạm ngưng", message);
+    }
+
     private static TicketSnapshot Closed(string code, DateTimeOffset closedAt, long? closedById,
         string? closedByName, long? assigneeId) => new()
     {

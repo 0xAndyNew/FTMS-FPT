@@ -39,7 +39,9 @@ public static partial class NotificationFormatter
         text.AppendLine($"🆔 <b>MÃ REQUEST:</b> <code>{Escape(ticket.Code)}</code>");
         var isStatusTransition = item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal &&
             item.PreviousStatus is not null && item.PreviousStatus.Value != ticket.Status;
-        if (item.EventType is not TicketEventType.Created and not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
+        var shouldShowStatus = item.EventType is not (TicketEventType.UnassignedReminder or TicketEventType.ResponseReminder) &&
+            (item.EventType != TicketEventType.Created || ticket.Status != TicketStatus.New);
+        if (shouldShowStatus)
             text.AppendLine(isStatusTransition
                 ? $"📌 <b>Trạng thái:</b> {Escape(item.PreviousStatus!.Value.DisplayName())} ➔ {Escape(ticket.Status.DisplayName())}"
                 : $"📌 <b>Trạng thái:</b> {Escape(ticket.Status.DisplayName())}");
@@ -54,8 +56,9 @@ public static partial class NotificationFormatter
             !item.Reason.Contains("Phát hiện ticket mới", StringComparison.OrdinalIgnoreCase) &&
             item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal)
             text.AppendLine($"📝 <b>Ghi chú:</b> {Escape(item.Reason.Trim())}");
-        if (item.EventType is not TicketEventType.AssignmentChanged and not TicketEventType.Created and
-            not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
+        var shouldShowAssignee = item.EventType is not (TicketEventType.AssignmentChanged or TicketEventType.UnassignedReminder or TicketEventType.ResponseReminder) &&
+            (item.EventType != TicketEventType.Created || (!string.IsNullOrWhiteSpace(ticket.AssigneeName) && ticket.AssigneeName.Trim() != "---" && ticket.AssigneeName.Trim() != "Chưa nhận"));
+        if (shouldShowAssignee)
             text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
         if (ticket.CreatedAt is not null)
             text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value)}");

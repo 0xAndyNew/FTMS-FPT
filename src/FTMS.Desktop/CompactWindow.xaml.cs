@@ -161,6 +161,24 @@ public partial class CompactWindow : Window
         FtmsWebView.CoreWebView2.SourceChanged += (_, _) => UpdateCurrentPage();
         MonitorWebView.CoreWebView2.NavigationStarting += (_, _) => _hiddenNavigationGeneration++;
         MonitorWebView.NavigationCompleted += OnMonitorNavigationCompleted;
+        MonitorWebView.CoreWebView2.ProcessFailed += (_, args) =>
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (_lifetime.IsCancellationRequested) return;
+                MonitorText.Text = $"WebView giám sát gặp sự cố ({args.ProcessFailedKind}); đang tải lại…";
+                _hiddenReloadAttempts = 0;
+                MonitorWebView.Reload();
+            });
+        };
+        FtmsWebView.CoreWebView2.ProcessFailed += (_, _) =>
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (_lifetime.IsCancellationRequested) return;
+                FtmsWebView.Reload();
+            });
+        };
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStatusMutationScript.Value);
         _displayLoginRecovery = new WebViewLoginRecovery(FtmsWebView, new Uri(FtmsReactUrl));

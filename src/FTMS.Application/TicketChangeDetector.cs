@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using FTMS.Domain;
 
 namespace FTMS.Application;
@@ -20,7 +21,7 @@ public sealed class TicketChangeDetector
             if (old is null)
             {
                 if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
-                    snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused) continue;
+                    (!IsCreatedToday(snapshot) && snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused)) continue;
                 var email = effectiveSnapshot.LatestEmail.IsExcluded() ? null : effectiveSnapshot.LatestEmail;
                 events.Add(Create(effectiveSnapshot with { LatestEmail = email }, TicketEventType.Created, null,
                     "Phát hiện ticket mới", email));
@@ -115,7 +116,7 @@ public sealed class TicketChangeDetector
             if (old is null)
             {
                 if (snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) ||
-                    snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused) continue;
+                    (!IsCreatedToday(snapshot) && snapshot.Status is TicketStatus.InProgress or TicketStatus.Paused)) continue;
                 var initialSlaReason = SlaReason(snapshot, settings.SlaThresholds);
                 if (initialSlaReason is not null)
                 {
@@ -236,6 +237,31 @@ public sealed class TicketChangeDetector
         return snapshot.SlaDeviationMinutes <= highestThreshold
             ? $"Sắp vi phạm SLA: còn {snapshot.SlaDeviationMinutes} phút"
             : null;
+    }
+
+    internal static bool IsCreatedToday(TicketSnapshot snapshot, DateTimeOffset? now = null)
+    {
+        var vnNow = (now ?? DateTimeOffset.UtcNow).ToOffset(TimeSpan.FromHours(7));
+        var today = vnNow.Date;
+        if (snapshot.CreatedAt is not null && snapshot.CreatedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date == today)
+            return true;
+
+        var match = Regex.Match(snapshot.Code, @"^(?:RQ|CA|AL)(\d{4})(\d{2})(\d{2})", RegexOptions.IgnoreCase);
+        if (match.Success &&
+            int.TryParse(match.Groups[1].Value, out var y) &&
+            int.TryParse(match.Groups[2].Value, out var m) &&
+            int.TryParse(match.Groups[3].Value, out var d))
+        {
+            try
+            {
+                return new DateTime(y, m, d) == today;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        return false;
     }
 
     internal static bool IsNewEmail(LatestEmail? old, LatestEmail? current)
