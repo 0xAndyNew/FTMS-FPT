@@ -277,11 +277,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const payload = await readPayload(response);
                   const message = apiError(payload);
                   if (message) throw new Error(message);
-                  const page = unwrap(payload);
-                  if (!page.found)
+                  const result = unwrap(payload);
+                  if (!result.found)
                     throw new Error(apiMessage(payload) || 'FTMS API không trả về danh sách dữ liệu');
-                  rows.push(...page.rows);
-                  if (page.rows.length < pageSize) break;
+                  rows.push(...result.rows);
+                  if (result.rows.length < pageSize) break;
                 }
                 return rows;
               };
