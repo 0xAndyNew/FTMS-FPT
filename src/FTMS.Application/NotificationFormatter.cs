@@ -64,7 +64,7 @@ public static partial class NotificationFormatter
             !item.Reason.Contains("Phát hiện ticket mới", StringComparison.OrdinalIgnoreCase) &&
             item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal)
             text.AppendLine($"📝 <b>Lý do:</b> {Escape(item.Reason.Trim())}");
-        var shouldShowAssignee = item.EventType is not (TicketEventType.AssignmentChanged or TicketEventType.UnassignedReminder or TicketEventType.ResponseReminder) &&
+        var shouldShowAssignee = item.EventType is not (TicketEventType.AssignmentChanged or TicketEventType.UnassignedReminder) &&
             (item.EventType != TicketEventType.Created || (!string.IsNullOrWhiteSpace(ticket.AssigneeName) && ticket.AssigneeName.Trim() != "---" && ticket.AssigneeName.Trim() != "Chưa nhận"));
         if (shouldShowAssignee)
             text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
@@ -84,10 +84,9 @@ public static partial class NotificationFormatter
             text.AppendLine($"🕰 <b>Thời gian từ lúc tạo ticket:</b> {ageMinutes} phút");
         var shouldShowChangeTime = item.EventType is not TicketEventType.Created &&
             item.EventType is not TicketEventType.UnassignedReminder &&
-            item.EventType is not TicketEventType.ResponseReminder &&
             item.EventType is not TicketEventType.SlaThresholdReached;
-        DateTimeOffset? changeTime = item.ChangedAt ?? ticket.UpdatedAt ??
-            (item.EventType == TicketEventType.EmailReceived ? email?.SentAt : null) ?? item.DetectedAt;
+        DateTimeOffset? changeTime = item.ChangedAt ?? ticket.ResponseReminderSince ?? ticket.UpdatedAt ??
+            (item.EventType is TicketEventType.EmailReceived or TicketEventType.ResponseReminder ? email?.SentAt : null) ?? item.DetectedAt;
         if (shouldShowChangeTime && changeTime is not null)
         {
             if (item.EventType == TicketEventType.EmailReceived)

@@ -1,5 +1,5 @@
 #define MyAppName "FTMS Companion"
-#define MyAppVersion "1.0.40"
+#define MyAppVersion "1.0.41"
 #define MyAppPublisher "FPT"
 #define MyAppExeName "FTMS.Companion.exe"
 

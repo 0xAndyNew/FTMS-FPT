@@ -1265,6 +1265,43 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("From: customer@example.com", message);
     }
 
+    [Fact]
+    public void Format_ResponseReminder_IncludesAssigneeCreatedTimeAndChangeTime()
+    {
+        var createdAt = new DateTimeOffset(2026, 10, 12, 14, 26, 33, TimeSpan.FromHours(7));
+        var responseSince = new DateTimeOffset(2026, 10, 12, 14, 26, 33, TimeSpan.FromHours(7));
+        var detectedAt = responseSince.AddMinutes(5);
+        var email = new LatestEmail("555", responseSince, "customer@fpt.com", "Hỗ trợ khách hàng", "Nội dung phản hồi");
+        var snapshot = Snapshot("RQ202610120178", TicketStatus.InProgress, email, responseSince) with
+        {
+            AssigneeName = "BachLX4",
+            CreatedAt = createdAt,
+            ResponseReminderEmailId = "555",
+            ResponseReminderSince = responseSince
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "response-reminder-test",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.ResponseReminder,
+            CurrentStatus = TicketStatus.InProgress,
+            DetectedAt = detectedAt,
+            Reason = "Ticket đã có phản hồi mới 5 phút",
+            LatestEmail = email,
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net/ihub");
+
+        Assert.Contains("NHẮC TICKET ĐÃ CÓ PHẢN HỒI MỚI", message);
+        Assert.Contains("👨‍💼 <b>Người xử lý:</b> BachLX4", message);
+        Assert.Contains("⏰ <b>Thời gian tạo:</b> 14:26:33 12/10/2026", message);
+        Assert.Contains("⏱ <b>Thời gian từ lúc có phản hồi mới:</b> 5 phút", message);
+        Assert.Contains("🗓 <b>Thời gian thay đổi:</b> 14:26:33 12/10/2026", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains("From: customer@fpt.com", message);
+    }
+
     private static LatestEmail Email(string id, DateTimeOffset sentAt, string body) =>
         new(id, sentAt, "sender@fpt.com", "Tiêu đề kiểm thử", body);
 
