@@ -522,11 +522,16 @@ public partial class CompactWindow : Window
                     _hiddenReloadAttempts = 0;
                 }
 
-                if (!_monitorStarted || _activeAccountId != visibleIdentity.UserId)
+                var monitorNeedsRecovery = MonitorWebView.Source is null ||
+                    !WebViewLoginRecovery.IsFtmsIhubUri(MonitorWebView.Source);
+
+                if (!_monitorStarted || _activeAccountId != visibleIdentity.UserId || monitorNeedsRecovery)
                 {
-                    if (MonitorWebView.Source is null ||
-                        !WebViewLoginRecovery.IsFtmsIhubUri(MonitorWebView.Source))
+                    if (monitorNeedsRecovery)
+                    {
+                        _ftmsClient?.NotifyTargetReached();
                         MonitorWebView.Source = new Uri(FtmsLegacyUrl);
+                    }
                     else
                         _ = CheckAndStartMonitorFromVisibleIdentityAsync(visibleIdentity.UserId);
                 }
@@ -563,9 +568,20 @@ public partial class CompactWindow : Window
 
     private void OnMonitorLoginRecoveryStatusChanged(LoginRecoveryStatus status)
     {
-        Dispatcher.Invoke(() => MonitorText.Text = status.RequiresUserAction
-            ? "Giám sát cần xác thực FTMS; hãy đăng nhập ở trang FTMS đang hiển thị."
-            : status.Message);
+        Dispatcher.Invoke(() =>
+        {
+            MonitorText.Text = status.RequiresUserAction
+                ? "Giám sát cần xác thực FTMS; hãy đăng nhập ở trang FTMS đang hiển thị."
+                : status.Message;
+            if (status.RequiresUserAction)
+            {
+                SetSessionStatus("Cần đăng nhập", "#D9A441");
+                if (FtmsWebView.Source is not null && WebViewLoginRecovery.IsFtmsIhubUri(FtmsWebView.Source))
+                {
+                    FtmsWebView.Reload();
+                }
+            }
+        });
     }
 
     private void SetSessionStatus(string text, string color)

@@ -192,7 +192,30 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 if (raw !== null && raw !== '' && Number.isFinite(numeric)) return numeric;
                 const name = String(pick(row, 'statusName','StatusName','STATUS_NAME','statusText','StatusText', 'status') || '')
                   .trim().toLocaleLowerCase('vi-VN');
-                return statusMap[name] ?? null;
+                return statusMap[name] ?? 0;
+              };
+              const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                const num1 = Number(p1);
+                const num2 = Number(p2);
+                if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                let day, month;
+                if (num2 > 12) {
+                  month = num1;
+                  day = num2;
+                } else if (num1 > 12) {
+                  day = num1;
+                  month = num2;
+                } else {
+                  day = num1;
+                  month = num2;
+                }
+                if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                const mm = String(month).padStart(2, '0');
+                const dd = String(day).padStart(2, '0');
+                const hh = String(hour || '00').padStart(2, '0');
+                const mi = String(minute || '00').padStart(2, '0');
+                const ss = String(second || '00').padStart(2, '0');
+                return `${year}-${mm}-${dd}T${hh}:${mi}:${ss}+07:00`;
               };
               const dateOf = value => {
                 if (value === null || value === undefined || value === '') return null;
@@ -210,23 +233,13 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   }
                   const dFirst = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
                   if (dFirst) {
-                    const day = dFirst[1].padStart(2, '0');
-                    const month = dFirst[2].padStart(2, '0');
-                    const year = dFirst[3];
-                    const hour = (dFirst[4] || '00').padStart(2, '0');
-                    const minute = (dFirst[5] || '00').padStart(2, '0');
-                    const second = (dFirst[6] || '00').padStart(2, '0');
-                    return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                    const parsed = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                    if (parsed) return parsed;
                   }
                   const tFirst = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
                   if (tFirst) {
-                    const hour = tFirst[1].padStart(2, '0');
-                    const minute = tFirst[2].padStart(2, '0');
-                    const second = (tFirst[3] || '00').padStart(2, '0');
-                    const day = tFirst[4].padStart(2, '0');
-                    const month = tFirst[5].padStart(2, '0');
-                    const year = tFirst[6];
-                    return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                    const parsed = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                    if (parsed) return parsed;
                   }
                   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z|([+-]\d{2}:?\d{2}))?$/);
                   if (iso) {
@@ -1037,13 +1050,30 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     {
         const string script = """
             (() => {
+              const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                const num1 = Number(p1);
+                const num2 = Number(p2);
+                if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                let day, month;
+                if (num2 > 12) { month = num1; day = num2; }
+                else if (num1 > 12) { day = num1; month = num2; }
+                else { day = num1; month = num2; }
+                if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hour||'00').padStart(2,'0')}:${String(minute||'00').padStart(2,'0')}:${String(second||'00').padStart(2,'0')}+07:00`;
+              };
               const parseViDate = s => {
                 if (!s) return null;
                 const clean = String(s).trim();
                 const dFirst = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
-                if (dFirst) return `${dFirst[3]}-${dFirst[2].padStart(2,'0')}-${dFirst[1].padStart(2,'0')}T${(dFirst[4]||'00').padStart(2,'0')}:${dFirst[5]||'00'}:${dFirst[6]||'00'}+07:00`;
+                if (dFirst) {
+                  const parsed = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                  if (parsed) return parsed;
+                }
                 const tFirst = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-                if (tFirst) return `${tFirst[6]}-${tFirst[5].padStart(2,'0')}-${tFirst[4].padStart(2,'0')}T${tFirst[1].padStart(2,'0')}:${tFirst[2]}:${tFirst[3]||'00'}+07:00`;
+                if (tFirst) {
+                  const parsed = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                  if (parsed) return parsed;
+                }
                 const iso = clean.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
                 if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}T${iso[4]}:${iso[5]}:${iso[6]||'00'}+07:00`;
                 return null;
@@ -1127,6 +1157,17 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               const controller = new AbortController();
               const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
               try {
+                const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                  const num1 = Number(p1);
+                  const num2 = Number(p2);
+                  if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                  let day, month;
+                  if (num2 > 12) { month = num1; day = num2; }
+                  else if (num1 > 12) { day = num1; month = num2; }
+                  else { day = num1; month = num2; }
+                  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                  return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hour||'00').padStart(2,'0')}:${String(minute||'00').padStart(2,'0')}:${String(second||'00').padStart(2,'0')}+07:00`;
+                };
                 const parseMailDate = value => {
                   if (!value) return null;
                   const normalized = String(value).replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1').trim();
@@ -1134,25 +1175,19 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (dotNet) return new Date(Number(dotNet[1]));
                   const dFirst = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
                   if (dFirst) {
-                    const day = dFirst[1].padStart(2, '0');
-                    const month = dFirst[2].padStart(2, '0');
-                    const year = dFirst[3];
-                    const hour = (dFirst[4] || '00').padStart(2, '0');
-                    const minute = (dFirst[5] || '00').padStart(2, '0');
-                    const second = (dFirst[6] || '00').padStart(2, '0');
-                    const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`);
-                    return Number.isNaN(parsed.getTime()) ? null : parsed;
+                    const iso = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                    if (iso) {
+                      const parsed = new Date(iso);
+                      if (!Number.isNaN(parsed.getTime())) return parsed;
+                    }
                   }
                   const tFirst = normalized.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
                   if (tFirst) {
-                    const hour = tFirst[1].padStart(2, '0');
-                    const minute = tFirst[2].padStart(2, '0');
-                    const second = (tFirst[3] || '00').padStart(2, '0');
-                    const day = tFirst[4].padStart(2, '0');
-                    const month = tFirst[5].padStart(2, '0');
-                    const year = tFirst[6];
-                    const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`);
-                    return Number.isNaN(parsed.getTime()) ? null : parsed;
+                    const iso = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                    if (iso) {
+                      const parsed = new Date(iso);
+                      if (!Number.isNaN(parsed.getTime())) return parsed;
+                    }
                   }
                   const isoWithoutZone = normalized.match(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/);
                   const parsed = new Date(isoWithoutZone ? normalized.replace(' ', 'T') + '+07:00' : normalized);
@@ -1434,25 +1469,26 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     const raw = String(value).trim();
                     const dotNet = raw.match(/^\/Date\((\d+)(?:[+-]\d+)?\)\/$/);
                     if (dotNet) return new Date(Number(dotNet[1])).toISOString();
+                    const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                      const num1 = Number(p1);
+                      const num2 = Number(p2);
+                      if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                      let day, month;
+                      if (num2 > 12) { month = num1; day = num2; }
+                      else if (num1 > 12) { day = num1; month = num2; }
+                      else { day = num1; month = num2; }
+                      if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                      return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hour||'00').padStart(2,'0')}:${String(minute||'00').padStart(2,'0')}:${String(second||'00').padStart(2,'0')}+07:00`;
+                    };
                     const dFirst = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
                     if (dFirst) {
-                      const day = dFirst[1].padStart(2, '0');
-                      const month = dFirst[2].padStart(2, '0');
-                      const year = dFirst[3];
-                      const hour = (dFirst[4] || '00').padStart(2, '0');
-                      const minute = (dFirst[5] || '00').padStart(2, '0');
-                      const second = (dFirst[6] || '00').padStart(2, '0');
-                      return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                      const parsed = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                      if (parsed) return parsed;
                     }
                     const tFirst = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
                     if (tFirst) {
-                      const hour = tFirst[1].padStart(2, '0');
-                      const minute = tFirst[2].padStart(2, '0');
-                      const second = (tFirst[3] || '00').padStart(2, '0');
-                      const day = tFirst[4].padStart(2, '0');
-                      const month = tFirst[5].padStart(2, '0');
-                      const year = tFirst[6];
-                      return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                      const parsed = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                      if (parsed) return parsed;
                     }
                     const local = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw);
                     const parsed = new Date(local ? raw.replace(' ', 'T') + '+07:00' : raw);
@@ -1764,12 +1800,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             if (root.ValueKind == JsonValueKind.String)
                 return DeserializeTickets(root.GetString() ?? string.Empty);
             if (root.ValueKind == JsonValueKind.Array)
-                return JsonSerializer.Deserialize<List<TicketSnapshot>>(root.GetRawText(), JsonOptions) ?? [];
+                return DeserializeTicketsList(root);
             if (root.ValueKind == JsonValueKind.Object &&
                 (root.TryGetProperty("data", out var data) || root.TryGetProperty("Data", out data)) &&
                 data.ValueKind == JsonValueKind.Array)
             {
-                return JsonSerializer.Deserialize<List<TicketSnapshot>>(data.GetRawText(), JsonOptions) ?? [];
+                return DeserializeTicketsList(data);
             }
         }
         catch (JsonException ex)
@@ -1778,5 +1814,64 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         }
 
         throw new InvalidOperationException("FTMS API không trả về danh sách dữ liệu.");
+    }
+
+    private static List<TicketSnapshot> DeserializeTicketsList(JsonElement arrayElement)
+    {
+        var list = new List<TicketSnapshot>();
+        foreach (var element in arrayElement.EnumerateArray())
+        {
+            try
+            {
+                var ticket = JsonSerializer.Deserialize<TicketSnapshot>(element.GetRawText(), JsonOptions);
+                if (ticket is not null && !string.IsNullOrWhiteSpace(ticket.Code))
+                    list.Add(ticket);
+            }
+            catch (JsonException)
+            {
+                var fallback = TryDeserializeTicketResilient(element);
+                if (fallback is not null && !string.IsNullOrWhiteSpace(fallback.Code))
+                    list.Add(fallback);
+            }
+        }
+        return list;
+    }
+
+    private static TicketSnapshot? TryDeserializeTicketResilient(JsonElement el)
+    {
+        if (el.ValueKind != JsonValueKind.Object) return null;
+        string? GetStr(string name) => el.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+        long? GetLong(string name) => el.TryGetProperty(name, out var p) && p.TryGetInt64(out var v) ? v : null;
+        int? GetInt(string name) => el.TryGetProperty(name, out var p) && p.TryGetInt32(out var v) ? v : null;
+        DateTimeOffset? GetDate(string name)
+        {
+            var s = GetStr(name);
+            return DateTimeOffset.TryParse(s, out var d) ? d : null;
+        }
+
+        var code = GetStr("code") ?? GetStr("Code");
+        if (string.IsNullOrWhiteSpace(code)) return null;
+
+        var statusInt = GetInt("status") ?? GetInt("Status") ?? 0;
+        var status = Enum.IsDefined(typeof(TicketStatus), statusInt) ? (TicketStatus)statusInt : TicketStatus.New;
+
+        return new TicketSnapshot
+        {
+            Code = code.Trim(),
+            Status = status,
+            Title = GetStr("title") ?? GetStr("Title"),
+            CreatedAt = GetDate("createdAt") ?? GetDate("CreatedAt"),
+            UpdatedAt = GetDate("updatedAt") ?? GetDate("UpdatedAt"),
+            UpdatedBy = GetStr("updatedBy") ?? GetStr("UpdatedBy"),
+            ClosedAt = GetDate("closedAt") ?? GetDate("ClosedAt"),
+            ClosedByUserId = GetLong("closedByUserId") ?? GetLong("ClosedByUserId"),
+            ClosedByName = GetStr("closedByName") ?? GetStr("ClosedByName"),
+            AssigneeId = GetLong("assigneeId") ?? GetLong("AssigneeId"),
+            AssigneeName = GetStr("assigneeName") ?? GetStr("AssigneeName"),
+            DepartmentId = GetLong("departmentId") ?? GetLong("DepartmentId"),
+            DepartmentName = GetStr("departmentName") ?? GetStr("DepartmentName"),
+            SlaDeviationMinutes = GetInt("slaDeviationMinutes") ?? GetInt("SlaDeviationMinutes"),
+            SlaType = GetInt("slaType") ?? GetInt("SlaType")
+        };
     }
 }

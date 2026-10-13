@@ -30,6 +30,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
     private int _generation;
     private bool _loginMethodClicked;
     private bool _waitingForUser;
+    private DateTimeOffset _waitingForUserUntil = DateTimeOffset.MinValue;
     private DateTimeOffset _nextNavigationAllowedAt = DateTimeOffset.MinValue;
 
     public event Action<LoginRecoveryStatus>? StatusChanged;
@@ -38,7 +39,14 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
 
     public async Task BeginAsync(CancellationToken cancellationToken)
     {
-        if (_waitingForUser || !await _recoveryLock.WaitAsync(0, cancellationToken)) return;
+        if (_waitingForUser)
+        {
+            if (DateTimeOffset.UtcNow < _waitingForUserUntil) return;
+            _waitingForUser = false;
+            _loginMethodClicked = false;
+        }
+
+        if (!await _recoveryLock.WaitAsync(0, cancellationToken)) return;
         try
         {
             var generation = _generation;
@@ -70,6 +78,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
         _generation++;
         _loginMethodClicked = false;
         _waitingForUser = false;
+        _waitingForUserUntil = DateTimeOffset.MinValue;
         State = LoginRecoveryState.Idle;
     }
 
@@ -141,6 +150,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
     private void EnterWaitingForUser(string message)
     {
         _waitingForUser = true;
+        _waitingForUserUntil = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(3);
         Publish(LoginRecoveryState.WaitingForUser, message, true);
     }
 
