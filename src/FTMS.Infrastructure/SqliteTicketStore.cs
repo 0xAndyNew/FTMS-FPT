@@ -7,7 +7,7 @@ namespace FTMS.Infrastructure;
 
 public sealed class SqliteTicketStore(string databasePath) : ITicketStore
 {
-    private string ConnectionString => $"Data Source={databasePath};Pooling=True";
+    private string ConnectionString => $"Data Source={databasePath};Pooling=True;Default Timeout=5";
 
     public async Task InitializeAsync(CancellationToken ct)
     {

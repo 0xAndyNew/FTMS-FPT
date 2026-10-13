@@ -52,11 +52,22 @@ public partial class CompactWindow : Window
     public CompactWindow()
     {
         InitializeComponent(); _settingsStore.Load(); _http = TelegramHttpClientFactory.Create(() => _settingsStore.Current); Loaded += InitializeAsync;
-        Closed += (_, _) => { _lifetime.Cancel(); _accountLifetime?.Cancel(); _refreshTimer.Stop(); _http.Dispose(); _trayIcon?.Dispose(); };
+        Closed += (_, _) =>
+        {
+            Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
+            _lifetime.Cancel();
+            _accountLifetime?.Cancel();
+            _refreshTimer.Stop();
+            _http.Dispose();
+            _trayIcon?.Dispose();
+        };
         Closing += OnWindowClosing;
         StateChanged += OnWindowStateChanged;
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();
         InitializeTrayIcon();
+        Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
     }
 
     private static void BlockFtmsBot(CoreWebView2 webView, CoreWebView2Environment environment)
@@ -121,8 +132,9 @@ public partial class CompactWindow : Window
         {
             if (FtmsWebView.CoreWebView2 is not null)
                 FtmsWebView.CoreWebView2.MemoryUsageTargetLevel = level;
+            // MonitorWebView runs background polling 24/7; never throttle or suspend its JS execution
             if (MonitorWebView.CoreWebView2 is not null)
-                MonitorWebView.CoreWebView2.MemoryUsageTargetLevel = level;
+                MonitorWebView.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
         }
         catch { }
     }
@@ -132,6 +144,53 @@ public partial class CompactWindow : Window
         SetWebViewMemoryLevel(WindowState == WindowState.Minimized
             ? CoreWebView2MemoryUsageTargetLevel.Low
             : CoreWebView2MemoryUsageTargetLevel.Normal);
+    }
+
+    private void OnPowerModeChanged(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
+    {
+        if (e.Mode != Microsoft.Win32.PowerModes.Resume || _lifetime.IsCancellationRequested) return;
+        _ = Dispatcher.BeginInvoke(async () =>
+        {
+            if (_lifetime.IsCancellationRequested) return;
+            MonitorText.Text = "Hệ thống vừa hoạt động trở lại, đang kiểm tra kết nối FTMS…";
+            await Task.Delay(3000, _lifetime.Token).ConfigureAwait(true);
+            if (_lifetime.IsCancellationRequested) return;
+
+            var monitor = _monitor;
+            var accountLifetime = _accountLifetime;
+            if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
+            {
+                _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
+            }
+
+            if (MonitorWebView.CoreWebView2 is not null)
+            {
+                var uri = MonitorWebView.Source;
+                if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri))
+                {
+                    MonitorWebView.Source = new Uri(FtmsLegacyUrl);
+                }
+            }
+        });
+    }
+
+    private void OnNetworkAvailabilityChanged(object? sender, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e)
+    {
+        if (!e.IsAvailable || _lifetime.IsCancellationRequested) return;
+        _ = Dispatcher.BeginInvoke(async () =>
+        {
+            if (_lifetime.IsCancellationRequested) return;
+            MonitorText.Text = "Mạng đã kết nối lại, đang kiểm tra đồng bộ…";
+            await Task.Delay(2000, _lifetime.Token).ConfigureAwait(true);
+            if (_lifetime.IsCancellationRequested) return;
+
+            var monitor = _monitor;
+            var accountLifetime = _accountLifetime;
+            if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
+            {
+                _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
+            }
+        });
     }
 
     private async void InitializeAsync(object sender, RoutedEventArgs e)
@@ -168,7 +227,14 @@ public partial class CompactWindow : Window
                 if (_lifetime.IsCancellationRequested) return;
                 MonitorText.Text = $"WebView giám sát gặp sự cố ({args.ProcessFailedKind}); đang tải lại…";
                 _hiddenReloadAttempts = 0;
-                MonitorWebView.Reload();
+                try
+                {
+                    MonitorWebView.Reload();
+                }
+                catch (Exception ex)
+                {
+                    MonitorText.Text = $"Không thể tải lại WebView giám sát: {ex.Message}";
+                }
             });
         };
         FtmsWebView.CoreWebView2.ProcessFailed += (_, _) =>
@@ -176,7 +242,11 @@ public partial class CompactWindow : Window
             Dispatcher.BeginInvoke(() =>
             {
                 if (_lifetime.IsCancellationRequested) return;
-                FtmsWebView.Reload();
+                try
+                {
+                    FtmsWebView.Reload();
+                }
+                catch { }
             });
         };
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);

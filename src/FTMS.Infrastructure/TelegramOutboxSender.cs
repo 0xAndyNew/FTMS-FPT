@@ -71,13 +71,13 @@ public sealed class TelegramOutboxSender(
         if (string.IsNullOrWhiteSpace(telegram.Token) || string.IsNullOrWhiteSpace(telegram.ChatId))
             return null;
 
-        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=True;Default Timeout=5");
         await connection.OpenAsync(ct);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT outbox.id,outbox.event_key,outbox.message,outbox.attempt_count
             FROM notification_outbox outbox
-            JOIN ticket_events event ON event.event_key=outbox.event_key
+            LEFT JOIN ticket_events event ON event.event_key=outbox.event_key
             WHERE outbox.sent_at IS NULL AND outbox.next_attempt_at<=$now
             ORDER BY CASE event.event_type
                 WHEN 'Created' THEN 0
