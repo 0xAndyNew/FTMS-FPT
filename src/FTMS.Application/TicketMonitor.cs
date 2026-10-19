@@ -669,14 +669,20 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             {
                 _recentClaims.Remove(expiredClaim);
             }
-            for (var i = 0; i < criticalList.Count; i++)
+            var resolveTasks = criticalList.Select(async evt =>
             {
-                var evt = criticalList[i];
                 var isResponseTransition = evt.EventType == TicketEventType.StatusChanged &&
                     evt.PreviousStatus == TicketStatus.Paused &&
                     evt.CurrentStatus == TicketStatus.InProgress;
                 var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
                     cancellationToken, isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
+                return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: enriched);
+            }).ToList();
+
+            var resolvedResults = await Task.WhenAll(resolveTasks);
+            for (var i = 0; i < criticalList.Count; i++)
+            {
+                var (evt, isResponseTransition, enriched) = resolvedResults[i];
                 if (enriched is not null)
                 {
                     var previousEmail = previousSnapshots.GetValueOrDefault(evt.TicketCode)?.LatestEmail;
@@ -719,16 +725,21 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 await store.SaveSnapshotAndEventsAsync(snapshot, entries, cancellationToken);
                 UpdateTrackedSnapshot(snapshot);
             }
+            if (criticalEvents.Count > 0) sender.Signal();
+
             var criticalCodes = criticalEvents.Select(item => item.TicketCode)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var snapshot in tickets.Where(item => !criticalCodes.Contains(item.Code)))
+            var nonCritical = tickets.Where(item => !criticalCodes.Contains(item.Code)).ToList();
+            if (nonCritical.Count > 0)
             {
-                await store.SaveSnapshotAsync(snapshot, cancellationToken);
-                UpdateTrackedSnapshot(snapshot);
+                await store.SaveSnapshotsAsync(nonCritical, cancellationToken);
+                foreach (var snapshot in nonCritical)
+                {
+                    UpdateTrackedSnapshot(snapshot);
+                }
             }
         }
         finally { _stateLock.Release(); }
-        if (criticalEvents.Count > 0) sender.Signal();
 
         var events = await detector.DetectSupplementalAsync(previousSnapshots, tickets, client, settings, cancellationToken);
         var ihubBase = new Uri(settings.FtmsUrl).GetLeftPart(UriPartial.Authority) + "/ihub";

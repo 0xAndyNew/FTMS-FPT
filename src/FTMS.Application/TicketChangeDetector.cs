@@ -70,17 +70,23 @@ public sealed class TicketChangeDetector
         var criticalEvents = DetectCritical(previous, current, settings);
         var result = new List<TicketEvent>(criticalEvents);
         var enrichedCurrent = current.ToList();
-        for (var i = 0; i < result.Count; i++)
+        var tasks = result.Select(async evt =>
         {
-            var evt = result[i];
             if (evt.EventType is not (TicketEventType.Created or TicketEventType.StatusChanged or TicketEventType.Terminal or TicketEventType.AssignmentChanged))
-                continue;
+                return (Event: evt, IsResponseTransition: false, Enriched: (LatestEmail?)null);
 
             var isResponseTransition = evt.EventType == TicketEventType.StatusChanged &&
                 evt.PreviousStatus == TicketStatus.Paused &&
                 evt.CurrentStatus == TicketStatus.InProgress;
             var enriched = await ResolveLatestEmailForNotificationAsync(client, evt.TicketCode, cancellationToken,
                 isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
+            return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: enriched);
+        }).ToList();
+
+        var resolved = await Task.WhenAll(tasks);
+        for (var i = 0; i < result.Count; i++)
+        {
+            var (evt, isResponseTransition, enriched) = resolved[i];
             if (enriched is null) continue;
 
             previous.TryGetValue(evt.TicketCode, out var previousSnapshot);
@@ -333,7 +339,7 @@ public sealed class TicketChangeDetector
         {
             first = await client.GetLatestEmailAsync(code, timeout.Token);
             var shouldRetry = !IsCompleteEmail(first) ||
-                cachedLatest is not null && !IsNewEmail(cachedLatest, first);
+                (refreshEvenWhenComplete && cachedLatest is not null && !IsNewEmail(cachedLatest, first));
             if (!shouldRetry) return SelectEmail(first, cachedLatest);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

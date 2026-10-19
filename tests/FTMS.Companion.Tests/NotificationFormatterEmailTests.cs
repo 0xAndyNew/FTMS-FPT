@@ -1302,6 +1302,86 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("From: customer@fpt.com", message);
     }
 
+    [Fact]
+    public async Task ChangeDetector_CreatedEvent_WithTruncatedListPreview_DoesNotRetryWhenFirstFetchIsComplete()
+    {
+        var sentAt = DateTimeOffset.UtcNow;
+        var truncatedPreview = Email("401", sentAt, "Dear KT, nhờ kiểm tra gấp đường truyền...");
+        var completeFullEmail = Email("401", sentAt, "<p>Dear KT,</p><p>Nhờ kiểm tra gấp đường truyền internet văn phòng chi nhánh đang bị mất kết nối hoàn toàn.</p>");
+        var snapshot = Snapshot("RQ-FAST-FETCH", TicketStatus.New, truncatedPreview, sentAt) with
+        {
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+
+        var calls = 0;
+        var client = new TestFtmsClient(() =>
+        {
+            calls++;
+            return completeFullEmail;
+        });
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot>(),
+            [snapshot],
+            client,
+            new AppSettings(),
+            CancellationToken.None);
+
+        var createdEvent = Assert.Single(events);
+        Assert.Equal(TicketEventType.Created, createdEvent.EventType);
+        // Must complete in exactly 1 call without redundant 300ms retry when first fetch is already complete
+        Assert.Equal(1, calls);
+        Assert.Equal(completeFullEmail.Body, createdEvent.LatestEmail?.Body);
+    }
+
+    [Fact]
+    public async Task ChangeDetector_MultipleCriticalEvents_ResolvesEmailsConcurrently()
+    {
+        var sentAt = DateTimeOffset.UtcNow;
+        var snap1 = Snapshot("RQ-CONCURRENT-1", TicketStatus.New, Email("501", sentAt, "Dear KT..."), sentAt) with { AssigneeId = null, AssigneeName = "---" };
+        var snap2 = Snapshot("RQ-CONCURRENT-2", TicketStatus.New, Email("502", sentAt, "Dear TOC..."), sentAt) with { AssigneeId = null, AssigneeName = "---" };
+
+        var email1 = Email("501", sentAt, "<p>Nội dung đầy đủ ticket 1</p>");
+        var email2 = Email("502", sentAt, "<p>Nội dung đầy đủ ticket 2</p>");
+
+        var client = new TestFtmsClient(onGetLatestEmailAsync: async ct =>
+        {
+            await Task.Delay(50, ct);
+            return email1;
+        });
+
+        // Test with custom client that routes by code
+        var customClient = new ConcurrentTestFtmsClient(code => code == "RQ-CONCURRENT-1" ? email1 : email2);
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot>(),
+            [snap1, snap2],
+            customClient,
+            new AppSettings(),
+            CancellationToken.None);
+
+        Assert.Equal(2, events.Count);
+        Assert.Contains(events, e => e.TicketCode == "RQ-CONCURRENT-1" && e.LatestEmail?.Body == email1.Body);
+        Assert.Contains(events, e => e.TicketCode == "RQ-CONCURRENT-2" && e.LatestEmail?.Body == email2.Body);
+    }
+
+    private sealed class ConcurrentTestFtmsClient(Func<string, LatestEmail?> getEmailByCode) : IFtmsClient
+    {
+        public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken) => Task.FromResult<CurrentUserIdentity?>(null);
+        public Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<TicketSnapshot>>([]);
+        public Task<IReadOnlyList<TicketSnapshot>> GetTicketsAsync(bool includeHistory, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<TicketSnapshot>>([]);
+        public Task<IReadOnlyList<TicketSnapshot>> GetClosedTicketsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<TicketSnapshot>>([]);
+        public Task<TicketClaimResult> ClaimTicketAsync(string ticketCode, long expectedUserId, CancellationToken cancellationToken) =>
+            Task.FromResult(new TicketClaimResult(TicketClaimStatus.Claimed, "ok"));
+        public Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken) =>
+            Task.FromResult(getEmailByCode(ticketCode));
+        public Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken) =>
+            Task.FromResult<StatusHistoryEntry?>(null);
+        public Task BeginLoginRecoveryAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
     private static LatestEmail Email(string id, DateTimeOffset sentAt, string body) =>
         new(id, sentAt, "sender@fpt.com", "Tiêu đề kiểm thử", body);
 
