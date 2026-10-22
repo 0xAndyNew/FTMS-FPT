@@ -273,7 +273,9 @@ public sealed class NotificationFormatterEmailTests
         Assert.Null(createdEvent.LatestEmail);
         var message = NotificationFormatter.Format(createdEvent, "https://ftms.fpt.net/ihub");
         Assert.Contains("TICKET MỚI", message);
-        Assert.DoesNotContain("<blockquote>", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains("Tiêu đề: ", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(snapshot.Title!), message);
     }
 
     [Fact]
@@ -698,7 +700,7 @@ public sealed class NotificationFormatterEmailTests
     }
 
     [Fact]
-    public void NotificationFormatter_StatusChanged_FormatsActorAndNote_WithoutEmptyBlockquote()
+    public void NotificationFormatter_StatusChanged_FormatsActorAndNote_IncludesTitleInBlockquote()
     {
         var snapshot = new TicketSnapshot
         {
@@ -728,7 +730,100 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains("👤 <b>Người thực hiện:</b> HieuDX2 - TOC - Ph&#242;ng Dịch vụ Data Center", message);
         Assert.Contains("📝 <b>Ghi chú:</b> Pending Customer", message);
         Assert.Contains("Đang thực hiện ➔ Tạm ngưng", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode("[Miền Bắc]-[HNID49102]-[Rack]-[LỖI KHÔNG CẬP NHẬT ĐƯỢC THÔNG TIN WEB]"), message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_WhenNoTitleAndNoEmail_DoesNotRenderEmptyBlockquote()
+    {
+        var snapshot = new TicketSnapshot
+        {
+            Code = "RQ-EMPTY",
+            Status = TicketStatus.New,
+            Title = null,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "KEY-EMPTY",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.Created,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = DateTimeOffset.UtcNow,
+            Reason = "Ticket mới",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net");
+
+        Assert.Contains("TICKET MỚI", message);
         Assert.DoesNotContain("<blockquote>", message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_WhenCreatedFromWebPortalWithDescription_RendersAuthorAndDescriptionInBlockquote()
+    {
+        var email = new LatestEmail(string.Empty, new DateTimeOffset(2026, 10, 21, 23, 16, 47, TimeSpan.FromHours(7)),
+            "NgocHV2", "Tiêu đề yêu cầu", "<p>Khách hàng báo đường truyền 42.117.7.28 bị suy hao nhờ kiểm tra.</p>");
+        var snapshot = new TicketSnapshot
+        {
+            Code = "RQ202610210319",
+            Status = TicketStatus.New,
+            Title = "[Miền Nam]-[HNID49102]-[Dedicated]-[v/v Hỗ trợ kiểm tra đường truyền 42.117.7.28]",
+            CreatedAt = new DateTimeOffset(2026, 10, 21, 23, 16, 47, TimeSpan.FromHours(7)),
+            LatestEmail = email
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "KEY-WEB-PORTAL",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.Created,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = new DateTimeOffset(2026, 10, 21, 23, 16, 47, TimeSpan.FromHours(7)),
+            Reason = "Ticket mới",
+            LatestEmail = email,
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net");
+
+        Assert.Contains("TICKET MỚI", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains("From: NgocHV2", message);
+        Assert.Contains("Time: 23:16:47 21/10/2026", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode("[Miền Nam]-[HNID49102]-[Dedicated]-[v/v Hỗ trợ kiểm tra đường truyền 42.117.7.28]"), message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode("Khách hàng báo đường truyền 42.117.7.28 bị suy hao nhờ kiểm tra"), message);
+    }
+
+    [Fact]
+    public void NotificationFormatter_UnassignedReminder_WithoutEmail_RendersTitleInBlockquote()
+    {
+        var snapshot = new TicketSnapshot
+        {
+            Code = "RQ202610210319",
+            Status = TicketStatus.New,
+            Title = "[Miền Nam]-[HNID49102]-[Dedicated]-[v/v Hỗ trợ kiểm tra đường truyền 42.117.7.28]",
+            CreatedAt = new DateTimeOffset(2026, 10, 21, 23, 16, 47, TimeSpan.FromHours(7)),
+            LatestEmail = null
+        };
+        var evt = new TicketEvent
+        {
+            EventKey = "KEY-REMINDER",
+            TicketCode = snapshot.Code,
+            EventType = TicketEventType.UnassignedReminder,
+            CurrentStatus = TicketStatus.New,
+            DetectedAt = new DateTimeOffset(2026, 10, 21, 23, 21, 47, TimeSpan.FromHours(7)),
+            Reason = "Nhắc nhở chưa nhận 5 phút",
+            Snapshot = snapshot
+        };
+
+        var message = NotificationFormatter.Format(evt, "https://ftms.fpt.net");
+
+        Assert.Contains("NHẮC TICKET CHƯA ĐƯỢC NHẬN", message);
+        Assert.Contains("5 phút", message);
+        Assert.Contains("<blockquote>", message);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode("[Miền Nam]-[HNID49102]-[Dedicated]-[v/v Hỗ trợ kiểm tra đường truyền 42.117.7.28]"), message);
     }
 
     [Fact]

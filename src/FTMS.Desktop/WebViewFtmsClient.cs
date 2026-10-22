@@ -258,13 +258,19 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const parsed = Number(value);
                 return Number.isFinite(parsed) ? parsed : null;
               };
-              const emailOf = row => {
-                const extract = value => String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
+              const isIgnoredSender = row => {
                 const keys = ['mailPoster','MailPoster','posterEmail','PosterEmail','poster','Poster',
                   'senderEmail','SenderEmail','sender','Sender','emailFrom','EmailFrom','fromEmail','FromEmail',
                   'fromAddress','FromAddress','mailFrom','MailFrom'];
                 const ignored = ['fti.sd02@fpt.com','ihub.akabot2','ducvm19@fpt.com'];
-                if (keys.some(key => ignored.some(value => String(row?.[key] || '').toLowerCase().includes(value)))) return null;
+                return keys.some(key => ignored.some(value => String(row?.[key] || '').toLowerCase().includes(value)));
+              };
+              const emailOf = row => {
+                if (isIgnoredSender(row)) return null;
+                const extract = value => String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
+                const keys = ['mailPoster','MailPoster','posterEmail','PosterEmail','poster','Poster',
+                  'senderEmail','SenderEmail','sender','Sender','emailFrom','EmailFrom','fromEmail','FromEmail',
+                  'fromAddress','FromAddress','mailFrom','MailFrom'];
                 const sender = keys.map(key => extract(row?.[key])[0]).find(Boolean) || null;
                 return sender;
               };
@@ -331,14 +337,18 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   slaDeviationMinutes: numberOf(pick(row, 'slaDeviation','SlaDeviation','SLA_DEVIATION','slaDeviationMinutes','SlaDeviationMinutes')),
                   slaType: numberOf(pick(row, 'typeSLA','TypeSLA','typeSla','slaType','SlaType','SLA_TYPE')),
                   latestEmail: (() => {
+                    if (isIgnoredSender(row)) return null;
                     const sender = emailOf(row);
                     const subject = pick(row, 'emailSubject','EmailSubject','title','Title','subject','Subject');
                     const content = pick(row, 'emailContent','EmailContent','contents','Contents','content','Content','description','Description','requestContent','RequestContent','body','Body','detail','Detail');
                     const sentAt = dateOf(pick(row, 'emailDate','EmailDate','sendDate','SendDate','sentAt','SentAt','createDate','CreateDate','createdAt','CreatedAt'));
-                    if (!sender || !sentAt) return null;
+                    if (!sentAt) return null;
                     const body = content ? String(content).trim() : null;
+                    const poster = pick(row, 'mailPoster','MailPoster','posterEmail','PosterEmail','poster','Poster','createBy','CreateBy','creator','Creator','sender','Sender');
+                    const effectiveSender = sender || (body ? (poster ? String(poster).trim() : 'FTMS Web') : null);
+                    if (!effectiveSender) return null;
                     return { id: String(pick(row, 'emailHistoryId','EmailHistoryId','emailId','EmailId','id','Id') || ''),
-                      sentAt, from: sender, subject, body };
+                      sentAt, from: String(effectiveSender).trim(), subject, body };
                   })()
                 })).filter(x => x.code && x.status !== null);
 
@@ -1344,9 +1354,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       if (ignoredSender(sender, mailField('poster', 'mailposter', 'sender', 'from')) ||
                           automatedReceipt(body)) continue;
                       const parsedDate = parseMailDate(sentAtValue(mail, fields));
+                      const poster = mailField('mailposter', 'poster', 'sender', 'createby', 'creator');
+                      const effectiveSender = sender || (body ? (poster ? String(poster).trim() : 'FTMS Web') : null);
+                      if (!effectiveSender) continue;
                       return JSON.stringify({ id: String(emailId || fileId || ''),
                         sentAt: parsedDate?.toISOString() || null,
-                        from: sender, subject: mailField('subject', 'emailsubject', 'title') || null, body });
+                        from: String(effectiveSender).trim(), subject: mailField('subject', 'emailsubject', 'title') || null, body });
                     }
                     // All email rows were deliberately excluded; the C88 fallback
                     // must not reintroduce an automated sender.
@@ -1410,8 +1423,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     sender = candidates[0]?.email || null;
                   }
                   if (ignoredSender(sender, field('MAIL_POSTER','POSTER','SENDER','FROM')) || automatedReceipt(body)) continue;
+                  const poster = field('MAIL_POSTER', 'POSTER', 'SENDER', 'CREATE_BY', 'CREATOR');
+                  const effectiveSender = sender || (body ? (poster ? String(poster).trim() : 'FTMS Web') : null);
                   return JSON.stringify({ id: String(emailId || fileId || ''), sentAt,
-                    from: sender, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || null, body });
+                    from: effectiveSender ? String(effectiveSender).trim() : null, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || null, body });
                 }
                 return JSON.stringify(null);
               } catch (error) {

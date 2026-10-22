@@ -119,8 +119,10 @@ public static partial class NotificationFormatter
         }
         var originalTicketTitle = string.IsNullOrWhiteSpace(ticket.Title) ? email?.Subject : ticket.Title;
         var emailBody = CleanEmail(email?.Body);
-        var shouldRenderBlockquote = email is not null &&
-            (!string.IsNullOrWhiteSpace(emailBody) || !string.IsNullOrWhiteSpace(email.From) || email.SentAt is not null || !string.IsNullOrWhiteSpace(originalTicketTitle));
+        var shouldRenderBlockquote = !string.IsNullOrWhiteSpace(originalTicketTitle) ||
+            !string.IsNullOrWhiteSpace(emailBody) ||
+            !string.IsNullOrWhiteSpace(email?.From) ||
+            email?.SentAt is not null;
         if (shouldRenderBlockquote)
         {
             text.AppendLine();
