@@ -201,6 +201,12 @@ public sealed class SqliteTicketStoreTests : IDisposable
     {
         await _store.InitializeAsync(CancellationToken.None);
 
+        var active0 = new TicketSnapshot
+        {
+            Code = "RQ-ACTIVE-0",
+            Status = TicketStatus.New,
+            IsTerminal = false
+        };
         var active1 = new TicketSnapshot
         {
             Code = "RQ-ACTIVE-1",
@@ -232,11 +238,12 @@ public sealed class SqliteTicketStoreTests : IDisposable
             IsTerminal = true
         };
 
-        await _store.SaveSnapshotsAsync([active1, active2, active3, completed, closed], CancellationToken.None);
+        await _store.SaveSnapshotsAsync([active0, active1, active2, active3, completed, closed], CancellationToken.None);
 
         var activeSnapshots = await _store.LoadActiveSnapshotsAsync(CancellationToken.None);
 
-        Assert.Equal(3, activeSnapshots.Count);
+        Assert.Equal(4, activeSnapshots.Count);
+        Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-0"));
         Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-1"));
         Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-2"));
         Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-3"));

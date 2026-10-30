@@ -307,8 +307,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
               const fetchActive = async () => {
                 const scopes = [
-                  ['1,2,4', false],
-                  ['1,2,4', true]
+                  ['0,1,2,4', false],
+                  ['0,1,2,4', true]
                 ];
                 const results = await Promise.allSettled(scopes.map(([statuses, mine]) =>
                   fetchActiveGroup(statuses, mine)));
@@ -1543,9 +1543,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const occurredAt = parseDate(dateText);
                   const statusText = normalize(heading.textContent);
                   return { status: statusMap[statusText.toLocaleLowerCase('vi-VN')], occurredAt, actor, note };
-                }).filter(x => x.occurredAt && x.status === {{expectedStatus}});
+                }).filter(x => x.occurredAt && x.status !== null && x.status !== undefined);
                 entries.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
-                return JSON.stringify(entries[0] || null);
+                const matching = entries.find(x => x.status === {{expectedStatus}});
+                return JSON.stringify(matching || entries[0] || null);
               } catch { return JSON.stringify(null); }
             })()
             """;

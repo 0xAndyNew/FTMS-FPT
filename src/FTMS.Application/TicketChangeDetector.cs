@@ -257,14 +257,14 @@ public sealed class TicketChangeDetector
             : null;
     }
 
-    internal static bool IsCreatedToday(TicketSnapshot snapshot, DateTimeOffset? now = null)
+    public static bool IsCreatedToday(TicketSnapshot snapshot, DateTimeOffset? now = null)
     {
         var vnNow = (now ?? DateTimeOffset.UtcNow).ToOffset(TimeSpan.FromHours(7));
         var today = vnNow.Date;
         if (snapshot.CreatedAt is not null && snapshot.CreatedAt.Value.ToOffset(TimeSpan.FromHours(7)).Date == today)
             return true;
 
-        var match = Regex.Match(snapshot.Code, @"^(?:RQ|CA|AL)(\d{4})(\d{2})(\d{2})", RegexOptions.IgnoreCase);
+        var match = Regex.Match(snapshot.Code, @"^(?:RQ|CA|AL|IN|PR|CR)(\d{4})(\d{2})(\d{2})", RegexOptions.IgnoreCase);
         if (match.Success &&
             int.TryParse(match.Groups[1].Value, out var y) &&
             int.TryParse(match.Groups[2].Value, out var m) &&

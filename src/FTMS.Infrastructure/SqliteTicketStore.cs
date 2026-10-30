@@ -42,7 +42,7 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         while (await reader.ReadAsync(ct))
         {
             var item = JsonSerializer.Deserialize<TicketSnapshot>(reader.GetString(0));
-            if (item is not null && !item.IsTerminal && item.Status is TicketStatus.Assigned or TicketStatus.InProgress or TicketStatus.Paused)
+            if (item is not null && !item.IsTerminal && item.Status is TicketStatus.New or TicketStatus.Assigned or TicketStatus.InProgress or TicketStatus.Paused)
                 result[item.Code] = item;
         }
         return result;

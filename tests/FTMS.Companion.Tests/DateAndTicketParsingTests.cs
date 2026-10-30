@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FTMS.Application;
 using FTMS.Domain;
 using Xunit;
 
@@ -90,6 +91,55 @@ public sealed class DateAndTicketParsingTests
         Assert.Equal(10, ticket.CreatedAt?.Month);
         Assert.Equal(13, ticket.CreatedAt?.Day);
         Assert.Equal(2026, ticket.CreatedAt?.Year);
+    }
+
+    [Theory]
+    [InlineData("IN202610300091", true)]
+    [InlineData("RQ202610300001", true)]
+    [InlineData("CA202610300001", true)]
+    [InlineData("AL202610300001", true)]
+    [InlineData("PR202610300001", true)]
+    [InlineData("CR202610300001", true)]
+    [InlineData("IN202610290001", false)] // Yesterday
+    [InlineData("UNKNOWN_CODE", false)]
+    public void IsCreatedToday_RecognizesAllFtmsPrefixes(string code, bool expected)
+    {
+        var fixedNow = new DateTimeOffset(2026, 10, 30, 14, 0, 0, TimeSpan.FromHours(7));
+        var snapshot = new TicketSnapshot
+        {
+            Code = code,
+            Status = TicketStatus.New,
+            CreatedAt = null // Test code parsing fallback
+        };
+
+        var result = TicketChangeDetector.IsCreatedToday(snapshot, fixedNow);
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void DetectCritical_NewTicketInStatusNew_GeneratesCreatedEvent()
+    {
+        var detector = new TicketChangeDetector();
+        var fixedNow = new DateTimeOffset(2026, 10, 30, 13, 8, 2, TimeSpan.FromHours(7));
+        var previous = new Dictionary<string, TicketSnapshot>(StringComparer.OrdinalIgnoreCase);
+        var current = new List<TicketSnapshot>
+        {
+            new()
+            {
+                Code = "IN202610300091",
+                Status = TicketStatus.New,
+                CreatedAt = fixedNow,
+                Title = "Yêu cầu hỗ trợ incident"
+            }
+        };
+
+        var events = detector.DetectCritical(previous, current, new AppSettings());
+
+        Assert.Single(events);
+        var evt = events[0];
+        Assert.Equal(TicketEventType.Created, evt.EventType);
+        Assert.Equal("IN202610300091", evt.TicketCode);
+        Assert.Equal(TicketStatus.New, evt.Snapshot.Status);
     }
 
     private sealed record SampleDateModel(DateTimeOffset? CreatedAt);
