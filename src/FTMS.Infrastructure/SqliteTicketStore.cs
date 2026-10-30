@@ -7,7 +7,7 @@ namespace FTMS.Infrastructure;
 
 public sealed class SqliteTicketStore(string databasePath) : ITicketStore
 {
-    private string ConnectionString => $"Data Source={databasePath};Pooling=True";
+    private string ConnectionString => $"Data Source={databasePath};Pooling=True;Default Timeout=5";
 
     public async Task InitializeAsync(CancellationToken ct)
     {
@@ -42,7 +42,8 @@ public sealed class SqliteTicketStore(string databasePath) : ITicketStore
         while (await reader.ReadAsync(ct))
         {
             var item = JsonSerializer.Deserialize<TicketSnapshot>(reader.GetString(0));
-            if (item is not null) result[item.Code] = item;
+            if (item is not null && !item.IsTerminal && item.Status is TicketStatus.Assigned or TicketStatus.InProgress or TicketStatus.Paused)
+                result[item.Code] = item;
         }
         return result;
     }

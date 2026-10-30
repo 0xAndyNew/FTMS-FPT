@@ -18,7 +18,7 @@ public static partial class NotificationFormatter
         text.AppendLine(item.EventType switch
         {
             TicketEventType.Created => "📨 <b>🔴 TICKET MỚI</b>",
-            TicketEventType.EmailReceived => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
+            TicketEventType.EmailReceived => "📧 <b>🔴 CÓ EMAIL PHẢN HỒI MỚI</b>",
             TicketEventType.UnassignedReminder => "🔔 <b>🟠 NHẮC TICKET CHƯA ĐƯỢC NHẬN</b>",
             TicketEventType.ResponseReminder => "🔔 <b>🟠 NHẮC TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
             TicketEventType.SlaThresholdReached when ticket.SlaType == 3 => "🚨 <b>🔴 ĐÃ VI PHẠM SLA</b>",
@@ -30,20 +30,30 @@ public static partial class NotificationFormatter
                 TicketStatus.Unprocessed => "⛔ <b>⚫ TICKET KHÔNG XỬ LÝ</b>",
                 _ => "✅ <b>🟢 TICKET KẾT THÚC</b>"
             },
-            TicketEventType.StatusChanged when ticket.Status == TicketStatus.InProgress &&
-                (item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) ||
-                 (item.PreviousStatus == TicketStatus.Paused && email is not null)) => "📧 <b>🔴 TICKET ĐÃ CÓ PHẢN HỒI MỚI</b>",
-            TicketEventType.StatusChanged => "🔄 <b>🔵 THAY ĐỔI TRẠNG THÁI</b>",
+            TicketEventType.StatusChanged => "🔄 <b>🔵 CHUYỂN TRẠNG THÁI TICKET</b>",
             TicketEventType.AssignmentChanged => AssignmentTitle(item),
             _ => "📣 <b>🔵 CẬP NHẬT TICKET</b>"
         });
         text.AppendLine($"🆔 <b>MÃ REQUEST:</b> <code>{Escape(ticket.Code)}</code>");
         var isStatusTransition = item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal &&
             item.PreviousStatus is not null && item.PreviousStatus.Value != ticket.Status;
-        if (item.EventType is not TicketEventType.Created and not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
-            text.AppendLine(isStatusTransition
-                ? $"📌 <b>Trạng thái:</b> {Escape(item.PreviousStatus!.Value.DisplayName())} ➔ {Escape(ticket.Status.DisplayName())}"
-                : $"📌 <b>Trạng thái:</b> {Escape(ticket.Status.DisplayName())}");
+        var shouldShowStatus = item.EventType is not (TicketEventType.UnassignedReminder or TicketEventType.ResponseReminder) &&
+            (item.EventType != TicketEventType.Created || ticket.Status != TicketStatus.New);
+        if (shouldShowStatus)
+        {
+            if (item.EventType == TicketEventType.EmailReceived)
+            {
+                text.AppendLine($"📌 <b>Trạng thái hiện tại:</b> {Escape(ticket.Status.DisplayName())}");
+            }
+            else if (isStatusTransition)
+            {
+                text.AppendLine($"📌 <b>Chuyển trạng thái:</b> {Escape(item.PreviousStatus!.Value.DisplayName())} ➔ {Escape(ticket.Status.DisplayName())}");
+            }
+            else
+            {
+                text.AppendLine($"📌 <b>Trạng thái:</b> {Escape(ticket.Status.DisplayName())}");
+            }
+        }
         if (isStatusTransition && !string.IsNullOrWhiteSpace(item.ChangedBy) && item.ChangedBy.Trim() != "---")
             text.AppendLine($"👤 <b>Người thực hiện:</b> {Escape(item.ChangedBy.Trim())}");
         if (!string.IsNullOrWhiteSpace(item.Note))
@@ -51,15 +61,15 @@ public static partial class NotificationFormatter
         else if (!string.IsNullOrWhiteSpace(item.Reason) &&
             !string.Equals(item.Reason, "Trạng thái ticket đã thay đổi", StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(item.Reason, "Người xử lý hoặc phòng ban đã thay đổi", StringComparison.OrdinalIgnoreCase) &&
-            !item.Reason.Contains("email mới", StringComparison.OrdinalIgnoreCase) &&
             !item.Reason.Contains("Phát hiện ticket mới", StringComparison.OrdinalIgnoreCase) &&
             item.EventType is TicketEventType.StatusChanged or TicketEventType.Terminal)
-            text.AppendLine($"📝 <b>Ghi chú:</b> {Escape(item.Reason.Trim())}");
-        if (item.EventType is not TicketEventType.AssignmentChanged and not TicketEventType.Created and
-            not TicketEventType.UnassignedReminder and not TicketEventType.ResponseReminder)
+            text.AppendLine($"📝 <b>Lý do:</b> {Escape(item.Reason.Trim())}");
+        var shouldShowAssignee = item.EventType is not (TicketEventType.AssignmentChanged or TicketEventType.UnassignedReminder) &&
+            (item.EventType != TicketEventType.Created || (!string.IsNullOrWhiteSpace(ticket.AssigneeName) && ticket.AssigneeName.Trim() != "---" && ticket.AssigneeName.Trim() != "Chưa nhận"));
+        if (shouldShowAssignee)
             text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
         if (ticket.CreatedAt is not null)
-            text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value, includeSeconds: false)}");
+            text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value)}");
         var ageMinutes = ticket.CreatedAt is null ? 0 : Math.Max(0, (int)(item.DetectedAt - ticket.CreatedAt.Value).TotalMinutes);
         if (item.EventType == TicketEventType.UnassignedReminder)
             text.AppendLine($"⏱ <b>Thời gian chưa nhận ticket:</b> {ageMinutes} phút");
@@ -74,17 +84,29 @@ public static partial class NotificationFormatter
             text.AppendLine($"🕰 <b>Thời gian từ lúc tạo ticket:</b> {ageMinutes} phút");
         var shouldShowChangeTime = item.EventType is not TicketEventType.Created &&
             item.EventType is not TicketEventType.UnassignedReminder &&
-            item.EventType is not TicketEventType.ResponseReminder &&
             item.EventType is not TicketEventType.SlaThresholdReached;
-        DateTimeOffset? changeTime = item.ChangedAt ?? ticket.UpdatedAt ??
-            (item.EventType == TicketEventType.EmailReceived ? email?.SentAt : null) ?? item.DetectedAt;
+        DateTimeOffset? changeTime = item.ChangedAt ?? ticket.ResponseReminderSince ?? ticket.UpdatedAt ??
+            (item.EventType is TicketEventType.EmailReceived or TicketEventType.ResponseReminder ? email?.SentAt : null) ?? item.DetectedAt;
         if (shouldShowChangeTime && changeTime is not null)
-            text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value, includeSeconds: false)}");
+        {
+            if (item.EventType == TicketEventType.EmailReceived)
+            {
+                text.AppendLine($"📩 <b>Thời gian gửi email:</b> {FormatVietnamTime(email?.SentAt ?? item.DetectedAt)}");
+            }
+            else if (item.EventType == TicketEventType.StatusChanged)
+            {
+                text.AppendLine($"🗓 <b>Thời gian đổi trạng thái:</b> {FormatVietnamTime(changeTime.Value)}");
+            }
+            else
+            {
+                text.AppendLine($"🗓 <b>Thời gian thay đổi:</b> {FormatVietnamTime(changeTime.Value)}");
+            }
+        }
         if (item.EventType == TicketEventType.AssignmentChanged)
         {
-            if (!string.Equals(item.PreviousAssigneeName, ticket.AssigneeName, StringComparison.OrdinalIgnoreCase))
+            if (AssigneeChanged(item))
                 text.AppendLine($"👥 <b>Người xử lý:</b> {Escape(NormalizeEmpty(item.PreviousAssigneeName, "Chưa nhận"))} ➔ {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
-            if (!string.Equals(item.PreviousDepartmentName, ticket.DepartmentName, StringComparison.OrdinalIgnoreCase))
+            if (DepartmentChanged(item))
                 text.AppendLine($"🏢 <b>Phòng ban:</b> {Escape(NormalizeEmpty(item.PreviousDepartmentName, "Chưa có"))} ➔ {Escape(NormalizeEmpty(ticket.DepartmentName, "Chưa có"))}");
         }
         if (item.EventType == TicketEventType.SlaThresholdReached)
@@ -97,8 +119,10 @@ public static partial class NotificationFormatter
         }
         var originalTicketTitle = string.IsNullOrWhiteSpace(ticket.Title) ? email?.Subject : ticket.Title;
         var emailBody = CleanEmail(email?.Body);
-        var shouldRenderBlockquote = email is not null &&
-            (!string.IsNullOrWhiteSpace(emailBody) || !string.IsNullOrWhiteSpace(email.From) || email.SentAt is not null || !string.IsNullOrWhiteSpace(originalTicketTitle));
+        var shouldRenderBlockquote = !string.IsNullOrWhiteSpace(originalTicketTitle) ||
+            !string.IsNullOrWhiteSpace(emailBody) ||
+            !string.IsNullOrWhiteSpace(email?.From) ||
+            email?.SentAt is not null;
         if (shouldRenderBlockquote)
         {
             text.AppendLine();
@@ -120,16 +144,40 @@ public static partial class NotificationFormatter
     public static string CleanEmail(string? html)
     {
         if (string.IsNullOrWhiteSpace(html)) return string.Empty;
-        html = LatestMessageHtmlRegex().Split(html, 2)[0];
-        var value = BreakRegex().Replace(html, "\n");
-        value = WebUtility.HtmlDecode(HtmlTagRegex().Replace(value, " "));
-        value = LineWhitespaceRegex().Replace(value, " ");
-        value = MultiLineRegex().Replace(value, "\n").Trim();
+
+        var raw = html;
+        if (raw.Contains("&lt;", StringComparison.OrdinalIgnoreCase) &&
+            raw.Contains("&gt;", StringComparison.OrdinalIgnoreCase))
+        {
+            raw = WebUtility.HtmlDecode(raw);
+        }
+
+        raw = HtmlHeadRegex().Replace(raw, " ");
+        raw = StyleRegex().Replace(raw, " ");
+        raw = ScriptRegex().Replace(raw, " ");
+        raw = XmlRegex().Replace(raw, " ");
+        raw = CommentRegex().Replace(raw, " ");
+
+        var split = LatestMessageHtmlRegex().Split(raw, 2);
+        var candidateHtml = split[0];
+        var value = StripHtml(candidateHtml);
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            value = StripHtml(raw);
+        }
+
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+        var fallbackClean = value;
 
         // 1. Cut quoted email thread / original message headers
         var quotedHeader = QuotedHeaderRegex().Match(value);
         if (quotedHeader.Success && quotedHeader.Index > 20)
-            value = value[..quotedHeader.Index].Trim();
+        {
+            var candidate = value[..quotedHeader.Index].Trim();
+            if (candidate.Length >= 15) value = candidate;
+        }
 
         // 2. Cut standard confidentiality notices and separator lines
         foreach (var marker in new[]
@@ -139,7 +187,11 @@ public static partial class NotificationFormatter
         })
         {
             var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (index >= 0) value = value[..index].Trim();
+            if (index >= 0)
+            {
+                var candidate = value[..index].Trim();
+                if (candidate.Length >= 15) value = candidate;
+            }
         }
 
         // 3. Cut mobile signatures and original message markers
@@ -150,7 +202,11 @@ public static partial class NotificationFormatter
         })
         {
             var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (index > 20) value = value[..index].Trim();
+            if (index > 20)
+            {
+                var candidate = value[..index].Trim();
+                if (candidate.Length >= 15) value = candidate;
+            }
         }
 
         // 4. Cut closing signatures intelligently:
@@ -161,7 +217,7 @@ public static partial class NotificationFormatter
         {
             // Verify there is substantial content before the closing phrase
             var beforeClosing = value[..closingMatch.Index].Trim();
-            if (beforeClosing.Length >= 10)
+            if (beforeClosing.Length >= 15)
             {
                 value = beforeClosing;
             }
@@ -180,7 +236,21 @@ public static partial class NotificationFormatter
             var previousLine = value.LastIndexOf('\n', index - 1);
             var signatureStart = previousLine > 0 ? value.LastIndexOf('\n', previousLine - 1) : -1;
             if (signatureStart < 0) signatureStart = previousLine >= 0 ? previousLine + 1 : index;
-            value = value[..signatureStart].Trim();
+            if (signatureStart > 0)
+            {
+                var candidate = value[..signatureStart].Trim();
+                if (candidate.Length >= 15) value = candidate;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(value) && !string.IsNullOrWhiteSpace(fallbackClean))
+            value = fallbackClean;
+
+        if (value.Contains('<') && value.Contains('>'))
+        {
+            value = HtmlTagRegex().Replace(value, " ");
+            value = LineWhitespaceRegex().Replace(value, " ");
+            value = MultiLineRegex().Replace(value, "\n").Trim();
         }
 
         // Telegram limit is 4096 chars per message; allow up to 3500 chars for body alone
@@ -190,33 +260,66 @@ public static partial class NotificationFormatter
         return value;
     }
 
+    private static string StripHtml(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return string.Empty;
+        var value = BreakRegex().Replace(html, "\n");
+        value = HtmlTagRegex().Replace(value, " ");
+        value = WebUtility.HtmlDecode(value);
+        if (value.Contains('<') && value.Contains('>'))
+        {
+            value = HtmlTagRegex().Replace(value, " ");
+        }
+        value = LineWhitespaceRegex().Replace(value, " ");
+        return MultiLineRegex().Replace(value, "\n").Trim();
+    }
+
     private static string Escape(string? value) => WebUtility.HtmlEncode(value ?? string.Empty);
 
     private static string AssignmentTitle(TicketEvent item)
     {
-        var hadAssignee = !string.IsNullOrWhiteSpace(item.PreviousAssigneeName) &&
-            item.PreviousAssigneeName.Trim() != "---" &&
-            !item.PreviousAssigneeName.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
-        var hasAssignee = !string.IsNullOrWhiteSpace(item.Snapshot.AssigneeName) &&
-            item.Snapshot.AssigneeName.Trim() != "---" &&
-            !item.Snapshot.AssigneeName.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
+        var hadAssignee = item.PreviousAssigneeId is not null and not 0 || HasAssigneeName(item.PreviousAssigneeName);
+        var hasAssignee = item.Snapshot.AssigneeId is not null and not 0 || HasAssigneeName(item.Snapshot.AssigneeName);
         if (!hadAssignee && hasAssignee) return "🙋 <b>🟢 TICKET ĐÃ CÓ NGƯỜI NHẬN</b>";
-        if (!string.Equals(item.PreviousAssigneeName, item.Snapshot.AssigneeName, StringComparison.OrdinalIgnoreCase))
-            return "👥 <b>🔵 TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ</b>";
+        if (AssigneeChanged(item)) return "👥 <b>🔵 TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ</b>";
         return "🏢 <b>🔵 TICKET ĐÃ CHUYỂN PHÒNG BAN</b>";
     }
+
+    private static bool AssigneeChanged(TicketEvent item) =>
+        item.PreviousAssigneeId is not null || item.Snapshot.AssigneeId is not null
+            ? item.PreviousAssigneeId != item.Snapshot.AssigneeId
+            : !string.Equals(item.PreviousAssigneeName, item.Snapshot.AssigneeName,
+                StringComparison.OrdinalIgnoreCase);
+
+    private static bool DepartmentChanged(TicketEvent item) =>
+        item.PreviousDepartmentId is not null || item.Snapshot.DepartmentId is not null
+            ? item.PreviousDepartmentId != item.Snapshot.DepartmentId
+            : !string.Equals(item.PreviousDepartmentName, item.Snapshot.DepartmentName,
+                StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasAssigneeName(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Trim() != "---" &&
+        !value.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeEmpty(string? value, string fallback) =>
         string.IsNullOrWhiteSpace(value) || value.Trim() == "---" ? fallback : value.Trim();
 
-    private static string FormatVietnamTime(DateTimeOffset value, bool includeSeconds = true) =>
-        value.ToOffset(TimeSpan.FromHours(7)).ToString(includeSeconds ? "dd/MM/yyyy HH:mm:ss" : "dd/MM/yyyy HH:mm",
-            CultureInfo.InvariantCulture) +
-        " (UTC+07:00)";
+    private static string FormatVietnamTime(DateTimeOffset value) =>
+        value.ToOffset(TimeSpan.FromHours(7)).ToString("HH:mm:ss dd/MM/yyyy", CultureInfo.InvariantCulture);
 
     [GeneratedRegex("<[^>]+>")]
     private static partial Regex HtmlTagRegex();
-    [GeneratedRegex(@"<hr\b[^>]*tabindex\s*=\s*['""]?-1|<hr\b[^>]*id\s*=\s*['""]?(?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]?|<(?:div|span|p)\b[^>]*id\s*=\s*['""](?:divRplyFwdMsg|x_divRplyFwdMsg|appendonsend)['""]", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"<head\b[^>]*>[\s\S]*?</head>", RegexOptions.IgnoreCase)]
+    private static partial Regex HtmlHeadRegex();
+    [GeneratedRegex(@"<style\b[^>]*>[\s\S]*?</style>", RegexOptions.IgnoreCase)]
+    private static partial Regex StyleRegex();
+    [GeneratedRegex(@"<script\b[^>]*>[\s\S]*?</script>", RegexOptions.IgnoreCase)]
+    private static partial Regex ScriptRegex();
+    [GeneratedRegex(@"<xml\b[^>]*>[\s\S]*?</xml>", RegexOptions.IgnoreCase)]
+    private static partial Regex XmlRegex();
+    [GeneratedRegex(@"<!--[\s\S]*?-->")]
+    private static partial Regex CommentRegex();
+    [GeneratedRegex(@"<hr\b[^>]*tabindex\s*=\s*['""]?-1|<hr\b[^>]*id\s*=\s*['""]?(?:(?:x_)*divRplyFwdMsg|(?:x_)*appendonsend)['""]?|<(?:div|span|p)\b[^>]*id\s*=\s*['""](?:(?:x_)*divRplyFwdMsg|(?:x_)*appendonsend)['""]", RegexOptions.IgnoreCase)]
     private static partial Regex LatestMessageHtmlRegex();
     [GeneratedRegex(@"<br\s*/?>|</?(?:p|div|tr|li|blockquote|h[1-6])\b[^>]*>|</(?:td|th)>", RegexOptions.IgnoreCase)]
     private static partial Regex BreakRegex();

@@ -21,9 +21,21 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     public async Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken)
     {
         var uri = await webView.Dispatcher.InvokeAsync(() => webView.Source).Task.WaitAsync(cancellationToken);
-        var authenticated = uri is not null && WebViewLoginRecovery.IsFtmsIhubUri(uri);
-        if (!authenticated) InvalidateCurrentUser();
-        return authenticated;
+        if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri))
+        {
+            InvalidateCurrentUser();
+            return false;
+        }
+
+        if (await _loginRecovery.IsLoginDocumentAsync(cancellationToken))
+        {
+            InvalidateCurrentUser();
+            return false;
+        }
+
+        if (await GetCurrentUserAsync(cancellationToken) is not null) return true;
+        InvalidateCurrentUser();
+        return false;
     }
 
     public async Task<CurrentUserIdentity?> GetCurrentUserAsync(CancellationToken cancellationToken)
@@ -39,10 +51,27 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken);
                 var json = await ExecuteJsonStringAsync(CurrentUserScript);
                 var identity = DeserializeCurrentUser(json);
-                if (identity is null) continue;
-                if (generation == _identityGeneration) _currentUser = identity;
-                return generation == _identityGeneration ? identity : null;
+                if (identity is not null)
+                {
+                    if (generation == _identityGeneration) _currentUser = identity;
+                    return generation == _identityGeneration ? identity : null;
+                }
             }
+
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                var asyncJson = await ExecuteAsyncJsonStringAsync(CurrentUserAsyncScript, timeout.Token);
+                var asyncIdentity = DeserializeCurrentUser(asyncJson);
+                if (asyncIdentity is not null)
+                {
+                    if (generation == _identityGeneration) _currentUser = asyncIdentity;
+                    return generation == _identityGeneration ? asyncIdentity : null;
+                }
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested) { }
+
             return null;
         }
         finally { _identityLock.Release(); }
@@ -76,8 +105,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var error))
         {
             var message = error.GetString() ?? "Không thể đọc API FTMS";
-            if (message.Contains("401", StringComparison.OrdinalIgnoreCase) || message.Contains("403", StringComparison.OrdinalIgnoreCase))
+            if (IsAuthenticationError(message))
+            {
+                InvalidateCurrentUser();
                 throw new UnauthorizedAccessException(message);
+            }
             throw new InvalidOperationException(message);
         }
         return DeserializeTickets(root.GetRawText());
@@ -89,22 +121,57 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         var historyFlag = includeHistory ? "true" : "false";
         return $$"""
             (async () => {
-              const unwrap = (value, depth = 0) => {
-                if (depth > 8 || value == null) return [];
-                if (Array.isArray(value)) return value;
+              const unwrap = (value, depth = 0, allowEmptyArray = depth === 0) => {
+                if (depth > 8 || value == null) return { found: false, rows: [] };
+                if (Array.isArray(value)) return {
+                  found: allowEmptyArray || value.some(x => x && typeof x === 'object'),
+                  rows: value
+                };
                 if (typeof value === 'string') {
-                  try { return unwrap(JSON.parse(value), depth + 1); } catch { return []; }
+                  try { return unwrap(JSON.parse(value), depth + 1, allowEmptyArray); }
+                  catch { return { found: false, rows: [] }; }
                 }
-                if (typeof value !== 'object') return [];
+                if (typeof value !== 'object') return { found: false, rows: [] };
                 for (const key of ['data','Data','rows','Rows','items','Items','result','Result']) {
-                  const rows = unwrap(value[key], depth + 1);
-                  if (rows.length) return rows;
+                  if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+                  const result = unwrap(value[key], depth + 1, true);
+                  if (result.found) return result;
                 }
                 for (const child of Object.values(value)) {
-                  const rows = unwrap(child, depth + 1);
-                  if (rows.some(x => x && typeof x === 'object')) return rows;
+                  const result = unwrap(child, depth + 1, false);
+                  if (result.found) return result;
                 }
-                return [];
+                return { found: false, rows: [] };
+              };
+              const apiMessage = payload => {
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+                const value = payload.message ?? payload.Message ?? payload.error ?? payload.Error ??
+                  payload.errorMessage ?? payload.ErrorMessage ?? payload.exceptionMessage ?? payload.ExceptionMessage;
+                if (value && typeof value === 'object')
+                  return String(value.value ?? value.Value ?? value.message ?? value.Message ?? JSON.stringify(value));
+                return value == null ? '' : String(value);
+              };
+              const apiError = payload => {
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+                const explicitError = payload.error ?? payload.Error ?? payload.errorMessage ?? payload.ErrorMessage ??
+                  payload.exceptionMessage ?? payload.ExceptionMessage;
+                const flag = payload.success ?? payload.Success ?? payload.status ?? payload.Status;
+                const failed = flag === false || flag === 0 || /^(false|fail|failed|error)$/i.test(String(flag ?? ''));
+                const hasError = explicitError != null && explicitError !== false && explicitError !== 0 &&
+                  !/^(|false|0)$/i.test(String(explicitError).trim());
+                const message = apiMessage(payload);
+                const knownError = /không có dữ liệu trả về từ api|có lỗi xảy ra|đăng nhập|\blogin\b|authentication|exception|\berror\b|thất bại/i.test(message);
+                if (!hasError && !failed && !knownError) return '';
+                return message || 'FTMS API báo lỗi';
+              };
+              const readPayload = async response => {
+                const text = await response.text();
+                try { return JSON.parse(text); }
+                catch {
+                  if (/\/id\/login|\/adfs\/|login-method|đăng nhập - FTI Management System/i.test(text))
+                    throw new Error('FTMS API HTTP 401');
+                  throw new Error('FTMS API trả về dữ liệu không hợp lệ');
+                }
               };
               const pick = (row, ...keys) => {
                 for (const key of keys) if (row?.[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
@@ -125,7 +192,30 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 if (raw !== null && raw !== '' && Number.isFinite(numeric)) return numeric;
                 const name = String(pick(row, 'statusName','StatusName','STATUS_NAME','statusText','StatusText', 'status') || '')
                   .trim().toLocaleLowerCase('vi-VN');
-                return statusMap[name] ?? null;
+                return statusMap[name] ?? 0;
+              };
+              const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                const num1 = Number(p1);
+                const num2 = Number(p2);
+                if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                let day, month;
+                if (num2 > 12) {
+                  month = num1;
+                  day = num2;
+                } else if (num1 > 12) {
+                  day = num1;
+                  month = num2;
+                } else {
+                  day = num1;
+                  month = num2;
+                }
+                if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                const mm = String(month).padStart(2, '0');
+                const dd = String(day).padStart(2, '0');
+                const hh = String(hour || '00').padStart(2, '0');
+                const mi = String(minute || '00').padStart(2, '0');
+                const ss = String(second || '00').padStart(2, '0');
+                return `${year}-${mm}-${dd}T${hh}:${mi}:${ss}+07:00`;
               };
               const dateOf = value => {
                 if (value === null || value === undefined || value === '') return null;
@@ -143,23 +233,13 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   }
                   const dFirst = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
                   if (dFirst) {
-                    const day = dFirst[1].padStart(2, '0');
-                    const month = dFirst[2].padStart(2, '0');
-                    const year = dFirst[3];
-                    const hour = (dFirst[4] || '00').padStart(2, '0');
-                    const minute = (dFirst[5] || '00').padStart(2, '0');
-                    const second = (dFirst[6] || '00').padStart(2, '0');
-                    return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                    const parsed = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                    if (parsed) return parsed;
                   }
                   const tFirst = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
                   if (tFirst) {
-                    const hour = tFirst[1].padStart(2, '0');
-                    const minute = tFirst[2].padStart(2, '0');
-                    const second = (tFirst[3] || '00').padStart(2, '0');
-                    const day = tFirst[4].padStart(2, '0');
-                    const month = tFirst[5].padStart(2, '0');
-                    const year = tFirst[6];
-                    return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                    const parsed = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                    if (parsed) return parsed;
                   }
                   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(?:Z|([+-]\d{2}:?\d{2}))?$/);
                   if (iso) {
@@ -178,13 +258,19 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const parsed = Number(value);
                 return Number.isFinite(parsed) ? parsed : null;
               };
-              const emailOf = row => {
-                const extract = value => String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
+              const isIgnoredSender = row => {
                 const keys = ['mailPoster','MailPoster','posterEmail','PosterEmail','poster','Poster',
                   'senderEmail','SenderEmail','sender','Sender','emailFrom','EmailFrom','fromEmail','FromEmail',
                   'fromAddress','FromAddress','mailFrom','MailFrom'];
                 const ignored = ['fti.sd02@fpt.com','ihub.akabot2','ducvm19@fpt.com'];
-                if (keys.some(key => ignored.some(value => String(row?.[key] || '').toLowerCase().includes(value)))) return null;
+                return keys.some(key => ignored.some(value => String(row?.[key] || '').toLowerCase().includes(value)));
+              };
+              const emailOf = row => {
+                if (isIgnoredSender(row)) return null;
+                const extract = value => String(value || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
+                const keys = ['mailPoster','MailPoster','posterEmail','PosterEmail','poster','Poster',
+                  'senderEmail','SenderEmail','sender','Sender','emailFrom','EmailFrom','fromEmail','FromEmail',
+                  'fromAddress','FromAddress','mailFrom','MailFrom'];
                 const sender = keys.map(key => extract(row?.[key])[0]).find(Boolean) || null;
                 return sender;
               };
@@ -207,9 +293,14 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (/\/id\/login|\/adfs\//i.test(new URL(response.url).pathname))
                     throw new Error('FTMS API HTTP 401');
                   if (!response.ok) throw new Error(`FTMS API HTTP ${response.status}`);
-                  const pageRows = unwrap(await response.json());
-                  rows.push(...pageRows);
-                  if (pageRows.length < pageSize) break;
+                  const payload = await readPayload(response);
+                  const message = apiError(payload);
+                  if (message) throw new Error(message);
+                  const result = unwrap(payload);
+                  if (!result.found)
+                    throw new Error(apiMessage(payload) || 'FTMS API không trả về danh sách dữ liệu');
+                  rows.push(...result.rows);
+                  if (result.rows.length < pageSize) break;
                 }
                 return rows;
               };
@@ -223,16 +314,14 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   fetchActiveGroup(statuses, mine)));
                 const rows = [];
                 const errors = [];
-                let anySuccess = false;
                 for (const result of results) {
                   if (result.status === 'fulfilled') {
-                    anySuccess = true;
                     rows.push(...result.value);
                   } else {
                     errors.push(String(result.reason?.message || result.reason || ''));
                   }
                 }
-                if (!anySuccess) throw new Error(errors.join('; ') || 'Không thể đọc danh sách ticket FTMS');
+                if (errors.length) throw new Error(errors.join('; ') || 'Không thể đọc đầy đủ danh sách ticket FTMS');
 
                 const tickets = rows.map(row => ({
                   code: String(pick(row, 'code','Code','requestCode','RequestCode','REQUEST_CODE','REQUESTCODE','requestNo','RequestNo') || '').trim(),
@@ -248,14 +337,18 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   slaDeviationMinutes: numberOf(pick(row, 'slaDeviation','SlaDeviation','SLA_DEVIATION','slaDeviationMinutes','SlaDeviationMinutes')),
                   slaType: numberOf(pick(row, 'typeSLA','TypeSLA','typeSla','slaType','SlaType','SLA_TYPE')),
                   latestEmail: (() => {
+                    if (isIgnoredSender(row)) return null;
                     const sender = emailOf(row);
-                    const subject = pick(row, 'emailSubject','EmailSubject');
-                    const content = pick(row, 'emailContent','EmailContent');
-                    const sentAt = dateOf(pick(row, 'emailDate','EmailDate','sendDate','SendDate','sentAt','SentAt'));
-                    if (!sender || !sentAt) return null;
-                    const body = String(content || '').trim() === String(subject || '').trim() ? null : content;
+                    const subject = pick(row, 'emailSubject','EmailSubject','title','Title','subject','Subject');
+                    const content = pick(row, 'emailContent','EmailContent','contents','Contents','content','Content','description','Description','requestContent','RequestContent','body','Body','detail','Detail');
+                    const sentAt = dateOf(pick(row, 'emailDate','EmailDate','sendDate','SendDate','sentAt','SentAt','createDate','CreateDate','createdAt','CreatedAt'));
+                    if (!sentAt) return null;
+                    const body = content ? String(content).trim() : null;
+                    const poster = pick(row, 'mailPoster','MailPoster','posterEmail','PosterEmail','poster','Poster','createBy','CreateBy','creator','Creator','sender','Sender');
+                    const effectiveSender = sender || (body ? (poster ? String(poster).trim() : 'FTMS Web') : null);
+                    if (!effectiveSender) return null;
                     return { id: String(pick(row, 'emailHistoryId','EmailHistoryId','emailId','EmailId','id','Id') || ''),
-                      sentAt, from: sender, subject, body };
+                      sentAt, from: String(effectiveSender).trim(), subject, body };
                   })()
                 })).filter(x => x.code && x.status !== null);
 
@@ -300,12 +393,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const fetchStatusHistory = async (historyStatus) => {
                   const list = [];
                   const seenPageKeys = new Set();
-                  for (let page = 1; page <= 2; page++) {
+                  for (let page = 1; page <= 1; page++) {
                     const historyParams = new URLSearchParams({
                       searchData: JSON.stringify({ search: '', source: '-1', departmentId: userDept, staffId: '-1',
                         serviceTypeGroup: '-1', serviceType: '-1', requestLevel: '-1', status: historyStatus }),
                       fromDate: vietnamDate(-1), toDate: vietnamDate(1), typeSearch: '0',
-                      take: '1000', skip: String((page - 1) * 1000), page: String(page), pageSize: '1000'
+                      take: '500', skip: '0', page: '1', pageSize: '500'
                     });
                     const historyResponse = await fetch('/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), {
                       credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' }
@@ -313,9 +406,13 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     if (/\/id\/login|\/adfs\//i.test(new URL(historyResponse.url).pathname))
                       throw new Error('FTMS history HTTP 401');
                     if (!historyResponse.ok) throw new Error(`FTMS history HTTP ${historyResponse.status}`);
-                    const historyPayload = await historyResponse.json();
-                    const historyRows = unwrap(historyPayload);
-                    if (!Array.isArray(historyRows)) throw new Error('FTMS history JSON không có danh sách dữ liệu');
+                    const historyPayload = await readPayload(historyResponse);
+                    const historyMessage = apiError(historyPayload);
+                    if (historyMessage) throw new Error(historyMessage);
+                    const historyPage = unwrap(historyPayload);
+                    if (!historyPage.found)
+                      throw new Error(apiMessage(historyPayload) || 'FTMS history JSON không có danh sách dữ liệu');
+                    const historyRows = historyPage.rows;
                     if (!historyRows.length) break;
                     const pageKey = historyRows.map(row => String(pick(row, 'id','Id','code','Code','requestCode','RequestCode') || '')).join('|');
                     if (seenPageKeys.has(pageKey)) break;
@@ -350,26 +447,24 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                         slaDeviationMinutes: null, slaType: null
                       });
                     }
-                    if (historyRows.length < 1000) break;
+                    if (historyRows.length < 500) break;
                   }
                   return list;
                 };
 
                 const results = await Promise.allSettled(['6', '5'].map(fetchStatusHistory));
                 const closed = [];
-                let anySuccess = false;
                 const errors = [];
                 for (let i = 0; i < results.length; i++) {
                   const r = results[i];
                   if (r.status === 'fulfilled') {
-                    anySuccess = true;
                     closed.push(...r.value);
                   } else {
                     errors.push(String(r.reason?.message || r.reason));
                   }
                 }
-                if (!anySuccess) {
-                  throw new Error(errors.join('; ') || 'Không thể đọc lịch sử đóng ticket FTMS');
+                if (errors.length) {
+                  throw new Error(errors.join('; ') || 'Không thể đọc đầy đủ lịch sử đóng ticket FTMS');
                 }
                 return closed;
               };
@@ -377,30 +472,22 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               let tickets = [];
               let closedTickets = [];
               try {
-                const tasks = [];
-                if ({{activeFlag}}) tasks.push(fetchActive());
-                if ({{historyFlag}}) tasks.push(fetchHistory());
-                const results = await Promise.allSettled(tasks);
-                let resultIdx = 0;
                 if ({{activeFlag}}) {
-                  const activeResult = results[resultIdx++];
-                  if (activeResult.status !== 'fulfilled') {
-                    const message = String(activeResult.reason?.message || activeResult.reason || '');
-                    return JSON.stringify({ error: message.includes('401') ? 'FTMS API HTTP 401' : (message || 'Lỗi đọc danh sách ticket FTMS') });
-                  }
-                  tickets = activeResult.value;
+                  tickets = await fetchActive();
                 }
                 if ({{historyFlag}}) {
-                  const historyResult = results[resultIdx++];
-                  if (historyResult.status === 'fulfilled') {
-                    closedTickets = historyResult.value;
-                  } else if (!{{activeFlag}}) {
-                    const message = String(historyResult.reason?.message || historyResult.reason || '');
-                    return JSON.stringify({ error: message.includes('401') ? 'FTMS history HTTP 401' : (message || 'Lỗi đọc lịch sử đóng ticket FTMS') });
+                  try {
+                    closedTickets = await fetchHistory();
+                  } catch (historyErr) {
+                    if (!{{activeFlag}}) {
+                      const message = String(historyErr?.message || historyErr || '');
+                      return JSON.stringify({ error: message.includes('401') ? 'FTMS history HTTP 401' : (message || 'Lỗi đọc lịch sử đóng ticket FTMS') });
+                    }
                   }
                 }
               } catch (error) {
-                return JSON.stringify({ error: String(error) });
+                const message = String(error?.message || error || '');
+                return JSON.stringify({ error: message.includes('401') ? 'FTMS API HTTP 401' : (message || 'Lỗi đọc danh sách ticket FTMS') });
               }
 
               if (!{{historyFlag}}) {
@@ -965,13 +1052,30 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     {
         const string script = """
             (() => {
+              const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                const num1 = Number(p1);
+                const num2 = Number(p2);
+                if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                let day, month;
+                if (num2 > 12) { month = num1; day = num2; }
+                else if (num1 > 12) { day = num1; month = num2; }
+                else { day = num1; month = num2; }
+                if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hour||'00').padStart(2,'0')}:${String(minute||'00').padStart(2,'0')}:${String(second||'00').padStart(2,'0')}+07:00`;
+              };
               const parseViDate = s => {
                 if (!s) return null;
                 const clean = String(s).trim();
                 const dFirst = clean.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
-                if (dFirst) return `${dFirst[3]}-${dFirst[2].padStart(2,'0')}-${dFirst[1].padStart(2,'0')}T${(dFirst[4]||'00').padStart(2,'0')}:${dFirst[5]||'00'}:${dFirst[6]||'00'}+07:00`;
+                if (dFirst) {
+                  const parsed = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                  if (parsed) return parsed;
+                }
                 const tFirst = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-                if (tFirst) return `${tFirst[6]}-${tFirst[5].padStart(2,'0')}-${tFirst[4].padStart(2,'0')}T${tFirst[1].padStart(2,'0')}:${tFirst[2]}:${tFirst[3]||'00'}+07:00`;
+                if (tFirst) {
+                  const parsed = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                  if (parsed) return parsed;
+                }
                 const iso = clean.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
                 if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}T${iso[4]}:${iso[5]}:${iso[6]||'00'}+07:00`;
                 return null;
@@ -1051,10 +1155,21 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         var code = JsonSerializer.Serialize(ticketCode);
         var script = $$"""
             (async () => {
-              const requestTimeoutMs = 700;
+              const requestTimeoutMs = 2500;
               const controller = new AbortController();
               const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
               try {
+                const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                  const num1 = Number(p1);
+                  const num2 = Number(p2);
+                  if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                  let day, month;
+                  if (num2 > 12) { month = num1; day = num2; }
+                  else if (num1 > 12) { day = num1; month = num2; }
+                  else { day = num1; month = num2; }
+                  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                  return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hour||'00').padStart(2,'0')}:${String(minute||'00').padStart(2,'0')}:${String(second||'00').padStart(2,'0')}+07:00`;
+                };
                 const parseMailDate = value => {
                   if (!value) return null;
                   const normalized = String(value).replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, '$1').trim();
@@ -1062,25 +1177,19 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   if (dotNet) return new Date(Number(dotNet[1]));
                   const dFirst = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
                   if (dFirst) {
-                    const day = dFirst[1].padStart(2, '0');
-                    const month = dFirst[2].padStart(2, '0');
-                    const year = dFirst[3];
-                    const hour = (dFirst[4] || '00').padStart(2, '0');
-                    const minute = (dFirst[5] || '00').padStart(2, '0');
-                    const second = (dFirst[6] || '00').padStart(2, '0');
-                    const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`);
-                    return Number.isNaN(parsed.getTime()) ? null : parsed;
+                    const iso = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                    if (iso) {
+                      const parsed = new Date(iso);
+                      if (!Number.isNaN(parsed.getTime())) return parsed;
+                    }
                   }
                   const tFirst = normalized.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
                   if (tFirst) {
-                    const hour = tFirst[1].padStart(2, '0');
-                    const minute = tFirst[2].padStart(2, '0');
-                    const second = (tFirst[3] || '00').padStart(2, '0');
-                    const day = tFirst[4].padStart(2, '0');
-                    const month = tFirst[5].padStart(2, '0');
-                    const year = tFirst[6];
-                    const parsed = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`);
-                    return Number.isNaN(parsed.getTime()) ? null : parsed;
+                    const iso = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                    if (iso) {
+                      const parsed = new Date(iso);
+                      if (!Number.isNaN(parsed.getTime())) return parsed;
+                    }
                   }
                   const isoWithoutZone = normalized.match(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/);
                   const parsed = new Date(isoWithoutZone ? normalized.replace(' ', 'T') + '+07:00' : normalized);
@@ -1119,35 +1228,37 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const readMailFile = async fileId => {
                   if (!fileId) return '';
                   const cleanId = String(fileId).trim();
+                  let response = null;
                   try {
-                    let response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId), {
+                    response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId), {
                       credentials: 'same-origin', signal: controller.signal,
                       headers: { 'X-Requested-With': 'XMLHttpRequest' }
                     });
-                    if (!response.ok) {
-                      response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId) + '&storage=2', {
-                        credentials: 'same-origin', signal: controller.signal,
-                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
-                      });
+                  } catch (error) {
+                    if (error?.name === 'AbortError') throw error;
+                  }
+                  if (!response?.ok) {
+                    response = await fetch('/ihub/email/ReadMailFromFile?fileId=' + encodeURIComponent(cleanId) + '&storage=2', {
+                      credentials: 'same-origin', signal: controller.signal,
+                      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    });
+                  }
+                  if (!response.ok) throw new Error(`FTMS email body HTTP ${response.status}`);
+                  let text = await response.text();
+                  if (!text) return '';
+                  try {
+                    const parsed = JSON.parse(text);
+                    if (typeof parsed === 'string') text = parsed;
+                    else if (parsed && typeof parsed === 'object') {
+                      text = parsed.contents || parsed.Contents || parsed.content || parsed.Content ||
+                             parsed.body || parsed.Body || parsed.html || parsed.Html ||
+                             (typeof parsed.data === 'string' ? parsed.data : parsed.data?.content || parsed.data?.body || parsed.data?.contents) ||
+                             (typeof parsed.Data === 'string' ? parsed.Data : parsed.Data?.Content || parsed.Data?.Body || parsed.Data?.Contents) ||
+                             text;
                     }
-                    if (!response.ok) return '';
-                    let text = await response.text();
-                    if (!text) return '';
-                    try {
-                      const parsed = JSON.parse(text);
-                      if (typeof parsed === 'string') text = parsed;
-                      else if (parsed && typeof parsed === 'object') {
-                        text = parsed.contents || parsed.Contents || parsed.content || parsed.Content ||
-                               parsed.body || parsed.Body || parsed.html || parsed.Html ||
-                               (typeof parsed.data === 'string' ? parsed.data : parsed.data?.content || parsed.data?.body || parsed.data?.contents) ||
-                               (typeof parsed.Data === 'string' ? parsed.Data : parsed.Data?.Content || parsed.Data?.Body || parsed.Data?.Contents) ||
-                               text;
-                      }
-                    } catch {}
-                    const str = String(text || '').trim();
-                    if (str && str !== '[object Object]') return str;
                   } catch {}
-                  return '';
+                  const str = String(text || '').trim();
+                  return str && str !== '[object Object]' ? str : '';
                 };
                 const extractFileId = obj => {
                   if (!obj) return null;
@@ -1179,6 +1290,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 };
 
                 // FTMS expects jQuery's default form encoding rather than JSON.
+                let historySucceeded = false;
                 const historyResponse = await fetch('/ihub/Email/GetEmailByCode', {
                   method: 'POST',
                   credentials: 'same-origin', signal: controller.signal,
@@ -1187,33 +1299,40 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   body: new URLSearchParams({ code: {{code}} }).toString()
                 });
                 if (historyResponse.ok) {
+                  historySucceeded = true;
                   let history = unwrapRows(await historyResponse.json());
                   if (history.length) {
-                    const dateValue = value => {
-                      const fallback = Object.entries(value || {}).find(([key, fieldValue]) =>
-                        /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
-                      const raw = value?.sendDate || value?.SendDate || value?.sentDate || value?.SentDate ||
-                        value?.emailDate || value?.EmailDate ||
-                        value?.createDate || value?.CreateDate || value?.createdDate || value?.CreatedDate ||
-                        value?.date || value?.Date || fallback;
-                      const parsed = parseMailDate(raw); return parsed?.getTime() || 0;
+                    const normalizedHistory = history.map(mail => ({
+                      mail,
+                      fields: Object.fromEntries(Object.entries(mail || {}).map(([key, value]) =>
+                        [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]))
+                    }));
+                    const field = (fields, ...names) => {
+                      for (const name of names) {
+                        const value = fields[name.replace(/[^a-z0-9]/gi, '').toLowerCase()];
+                        if (value !== undefined && value !== null && value !== '') return value;
+                      }
+                      return null;
                     };
-                    history.sort((a, b) => dateValue(b) - dateValue(a) || Number(b.id || b.Id || 0) - Number(a.id || a.Id || 0));
-                    for (const mail of history) {
-                      const normalizedMail = Object.fromEntries(Object.entries(mail || {}).map(([key, value]) => [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]));
-                      const mailField = (...names) => {
-                        for (const name of names) {
-                          const value = normalizedMail[name.replace(/[^a-z0-9]/gi, '').toLowerCase()];
-                          if (value !== undefined && value !== null && value !== '') return value;
-                        }
-                        return null;
-                      };
+                    const sentAtValue = (mail, fields) => field(fields,
+                      'lasttimeresponse', 'lastresponsetime', 'timeresponse', 'responsetime',
+                      'senddate', 'sentdate', 'emaildate', 'createdate', 'createddate', 'date', 'sentat') ||
+                      Object.entries(mail || {}).find(([key, fieldValue]) =>
+                        /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
+                    normalizedHistory.sort((a, b) => {
+                      const leftTime = parseMailDate(sentAtValue(a.mail, a.fields))?.getTime() || 0;
+                      const rightTime = parseMailDate(sentAtValue(b.mail, b.fields))?.getTime() || 0;
+                      const leftId = Number(field(a.fields, 'id', 'emailhistoryid', 'maxeh')) || 0;
+                      const rightId = Number(field(b.fields, 'id', 'emailhistoryid', 'maxeh')) || 0;
+                      return rightTime - leftTime || rightId - leftId;
+                    });
+                    for (const { mail, fields } of normalizedHistory) {
+                      const mailField = (...names) => field(fields, ...names);
                       const emailId = mailField('id', 'emailhistoryid', 'maxeh');
                       const fileId = extractFileId(mail);
                       let body = '';
                       if (fileId) body = await readMailFile(fileId);
-                      if (!body) body = mailField('contents', 'content', 'body') || '';
-                      if (String(body).trim() === String(mailField('subject', 'emailsubject', 'title') || '').trim()) body = '';
+                      if (!body) body = mailField('contents', 'content', 'body', 'description', 'requestcontent', 'detail') || '';
                       let sender = [mailField('mailposter', 'posteremail', 'poster', 'senderemail', 'sender',
                         'emailfrom', 'fromemail', 'fromaddress', 'mailfrom', 'from')].map(emailAddress).find(Boolean);
                       if (!sender) {
@@ -1226,14 +1345,13 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                       }
                       if (ignoredSender(sender, mailField('poster', 'mailposter', 'sender', 'from')) ||
                           automatedReceipt(body)) continue;
-                      const fallbackDate = Object.entries(mail).find(([key, fieldValue]) =>
-                        /(?:date|time|sent|send|created)/i.test(key) && fieldValue)?.[1];
-                      const rawDate = mailField('senddate', 'sentdate', 'emaildate', 'createdate', 'createddate',
-                        'date', 'lasttimeresponse', 'lastresponsetime', 'timeresponse', 'responsetime', 'sentat') || fallbackDate;
-                      const parsedDate = parseMailDate(rawDate);
+                      const parsedDate = parseMailDate(sentAtValue(mail, fields));
+                      const poster = mailField('mailposter', 'poster', 'sender', 'createby', 'creator');
+                      const effectiveSender = sender || (body ? (poster ? String(poster).trim() : 'FTMS Web') : null);
+                      if (!effectiveSender) continue;
                       return JSON.stringify({ id: String(emailId || fileId || ''),
                         sentAt: parsedDate?.toISOString() || null,
-                        from: sender, subject: mailField('subject', 'emailsubject', 'title') || null, body });
+                        from: String(effectiveSender).trim(), subject: mailField('subject', 'emailsubject', 'title') || null, body });
                     }
                     // All email rows were deliberately excluded; the C88 fallback
                     // must not reintroduce an automated sender.
@@ -1247,14 +1365,18 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   headers: { 'X-Requested-With': 'XMLHttpRequest' },
                   body: form
                 });
-                if (!metaResponse.ok) return JSON.stringify(null);
+                if (!metaResponse.ok) {
+                  if (historySucceeded) return JSON.stringify(null);
+                  throw new Error(`FTMS email API HTTP ${historyResponse.status}; fallback HTTP ${metaResponse.status}`);
+                }
                 const meta = await metaResponse.json();
                 const rows = unwrapRows(meta);
                 if (!rows.length) return JSON.stringify(null);
                 const historyValue = row => {
                   const normalized = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/[^a-z0-9]/gi, '').toLowerCase(), value]));
                   const rawDate = normalized.lasttimeresponse || normalized.lastresponsetime || normalized.timeresponse ||
-                    normalized.responsetime || normalized.senddate || normalized.sentat || normalized.createdate;
+                    normalized.responsetime || normalized.senddate || normalized.sentdate || normalized.emaildate ||
+                    normalized.createdate || normalized.createddate || normalized.date || normalized.sentat;
                   const parsed = parseMailDate(rawDate)?.getTime() || 0;
                   const rawId = normalized.maxeh || normalized.emailhistoryid || normalized.id || 0;
                   return { time: Number.isNaN(parsed) ? 0 : parsed, id: Number(rawId) || 0 };
@@ -1276,8 +1398,9 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                   const fileId = extractFileId(row);
                   let body = '';
                   if (fileId) body = await readMailFile(fileId);
-                  if (!body) body = field('CONTENTS', 'CONTENT', 'BODY') || '';
-                  const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME', 'SEND_DATE', 'SENT_AT', 'CREATE_DATE');
+                  if (!body) body = field('CONTENTS', 'CONTENT', 'BODY', 'DESCRIPTION', 'REQUEST_CONTENT', 'DETAIL') || '';
+                  const rawSentAt = field('LAST_TIME_RESPONSE', 'LAST_RESPONSE_TIME', 'TIME_RESPONSE', 'RESPONSE_TIME',
+                    'SEND_DATE', 'SENT_DATE', 'EMAIL_DATE', 'CREATE_DATE', 'CREATED_DATE', 'DATE', 'SENT_AT');
                   const parsedSentAt = parseMailDate(rawSentAt);
                   let sentAt = parsedSentAt?.toISOString() || null;
                   let sender = ['MAIL_POSTER', 'POSTER_EMAIL', 'POSTER', 'SENDER_EMAIL', 'SENDER',
@@ -1292,16 +1415,22 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     sender = candidates[0]?.email || null;
                   }
                   if (ignoredSender(sender, field('MAIL_POSTER','POSTER','SENDER','FROM')) || automatedReceipt(body)) continue;
+                  const poster = field('MAIL_POSTER', 'POSTER', 'SENDER', 'CREATE_BY', 'CREATOR');
+                  const effectiveSender = sender || (body ? (poster ? String(poster).trim() : 'FTMS Web') : null);
                   return JSON.stringify({ id: String(emailId || fileId || ''), sentAt,
-                    from: sender, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || null, body });
+                    from: effectiveSender ? String(effectiveSender).trim() : null, subject: field('SUBJECT', 'EMAIL_SUBJECT', 'TITLE') || null, body });
                 }
                 return JSON.stringify(null);
-              } catch { return JSON.stringify(null); }
+              } catch (error) {
+                return JSON.stringify({ error: error?.name === 'AbortError'
+                  ? 'FTMS email API timeout'
+                  : String(error?.message || error || 'FTMS email API error') });
+              }
               finally { clearTimeout(timeoutId); }
             })()
             """;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromMilliseconds(800));
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
         try
         {
             var json = await ExecuteAsyncJsonStringAsync(script, timeout.Token);
@@ -1309,7 +1438,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return null;
+            throw new TimeoutException($"FTMS không phản hồi email của {ticketCode} trong 3 giây.");
         }
     }
 
@@ -1347,25 +1476,26 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     const raw = String(value).trim();
                     const dotNet = raw.match(/^\/Date\((\d+)(?:[+-]\d+)?\)\/$/);
                     if (dotNet) return new Date(Number(dotNet[1])).toISOString();
+                    const parseDateParts = (p1, p2, year, hour, minute, second) => {
+                      const num1 = Number(p1);
+                      const num2 = Number(p2);
+                      if (!num1 || !num2 || num1 > 31 || num2 > 31) return null;
+                      let day, month;
+                      if (num2 > 12) { month = num1; day = num2; }
+                      else if (num1 > 12) { day = num1; month = num2; }
+                      else { day = num1; month = num2; }
+                      if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+                      return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}T${String(hour||'00').padStart(2,'0')}:${String(minute||'00').padStart(2,'0')}:${String(second||'00').padStart(2,'0')}+07:00`;
+                    };
                     const dFirst = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
                     if (dFirst) {
-                      const day = dFirst[1].padStart(2, '0');
-                      const month = dFirst[2].padStart(2, '0');
-                      const year = dFirst[3];
-                      const hour = (dFirst[4] || '00').padStart(2, '0');
-                      const minute = (dFirst[5] || '00').padStart(2, '0');
-                      const second = (dFirst[6] || '00').padStart(2, '0');
-                      return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                      const parsed = parseDateParts(dFirst[1], dFirst[2], dFirst[3], dFirst[4], dFirst[5], dFirst[6]);
+                      if (parsed) return parsed;
                     }
                     const tFirst = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*-?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
                     if (tFirst) {
-                      const hour = tFirst[1].padStart(2, '0');
-                      const minute = tFirst[2].padStart(2, '0');
-                      const second = (tFirst[3] || '00').padStart(2, '0');
-                      const day = tFirst[4].padStart(2, '0');
-                      const month = tFirst[5].padStart(2, '0');
-                      const year = tFirst[6];
-                      return `${year}-${month}-${day}T${hour}:${minute}:${second}+07:00`;
+                      const parsed = parseDateParts(tFirst[4], tFirst[5], tFirst[6], tFirst[1], tFirst[2], tFirst[3]);
+                      if (parsed) return parsed;
                     }
                     const local = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw);
                     const parsed = new Date(local ? raw.replace(' ', 'T') + '+07:00' : raw);
@@ -1388,7 +1518,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     (index === 0 || rows[index - 1].status !== row.status));
                   if (changes.length) {
                     const latest = changes[changes.length - 1];
-                    return JSON.stringify({ occurredAt: latest.occurredAt, actor: latest.actor, note: latest.note });
+                    return JSON.stringify({ status: latest.status, occurredAt: latest.occurredAt, actor: latest.actor, note: latest.note });
+                  }
+                  if (rows.length) {
+                    const latest = rows[rows.length - 1];
+                    return JSON.stringify({ status: latest.status, occurredAt: latest.occurredAt, actor: latest.actor, note: latest.note });
                   }
                 }
                 const editResponse = await fetch('/ihub/{{route}}/edit/' + encodeURIComponent({{code}}), {
@@ -1431,7 +1565,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             var note = root.TryGetProperty("note", out var noteValue) ? noteValue.GetString() : null;
             var occurredText = root.TryGetProperty("occurredAt", out var occurredValue) ? occurredValue.GetString() : null;
             DateTimeOffset? occurredAt = DateTimeOffset.TryParse(occurredText, out var parsed) ? parsed : null;
-            return new StatusHistoryEntry(status, occurredAt, actor, note);
+            var actualStatus = root.TryGetProperty("status", out var statusValue) && statusValue.TryGetInt32(out var parsedStatus)
+                ? (TicketStatus)parsedStatus
+                : status;
+            return new StatusHistoryEntry(actualStatus, occurredAt, actor, note);
         }
         catch (JsonException) { return null; }
     }
@@ -1450,11 +1587,21 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
     public bool IsTargetUri(Uri uri) => _loginRecovery.IsTargetUri(uri);
 
+    internal Task<bool> IsLoginDocumentAsync(CancellationToken cancellationToken) =>
+        _loginRecovery.IsLoginDocumentAsync(cancellationToken);
+
     private void InvalidateCurrentUser()
     {
         _identityGeneration++;
         _currentUser = null;
     }
+
+    private static bool IsAuthenticationError(string message) =>
+        message.Contains("401", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("403", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("đăng nhập", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("login", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("authentication", StringComparison.OrdinalIgnoreCase);
 
     private static CurrentUserIdentity? DeserializeCurrentUser(string json)
     {
@@ -1484,17 +1631,97 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
     private const string CurrentUserScript = """
         (() => {
           try {
-            const userId = Number(globalThis.userID);
-            if (!Number.isInteger(userId) || userId <= 0) return JSON.stringify(null);
             const text = value => value == null || String(value).trim() === '' ? null : String(value).trim();
-            const departmentId = Number(globalThis.UserDept);
-            return JSON.stringify({
-              userId,
-              userName: text(globalThis.Username),
-              departmentId: Number.isFinite(departmentId) ? departmentId : null,
-              departmentName: text(globalThis.DepartmentName)
-            });
+            let userId = Number(globalThis.userID);
+            let userName = globalThis.Username;
+            let deptId = Number(globalThis.UserDept);
+            let deptName = globalThis.DepartmentName;
+
+            if (Number.isInteger(userId) && userId > 0) {
+              return JSON.stringify({
+                userId,
+                userName: text(userName),
+                departmentId: Number.isFinite(deptId) ? deptId : null,
+                departmentName: text(deptName)
+              });
+            }
+
+            for (const script of document.querySelectorAll('script')) {
+              const content = script.textContent || '';
+              if (content.includes('userID') && content.includes('Username')) {
+                const uidM = content.match(/(?:var\s+|window\.)?userID\s*=\s*['"]?(\d+)['"]?/i);
+                const unameM = content.match(/(?:var\s+|window\.)?Username\s*=\s*['"]([^'"]+)['"]/i);
+                const udeptM = content.match(/(?:var\s+|window\.)?UserDept\s*=\s*['"]?(\d+)['"]?/i);
+                const dnameM = content.match(/(?:var\s+|window\.)?DepartmentName\s*=\s*['"]([^'"]+)['"]/i);
+                if (uidM && uidM[1]) {
+                  userId = Number(uidM[1]);
+                  userName = unameM ? unameM[1] : null;
+                  deptId = udeptM ? Number(udeptM[1]) : null;
+                  deptName = dnameM ? dnameM[1] : null;
+                  if (Number.isInteger(userId) && userId > 0) {
+                    return JSON.stringify({
+                      userId,
+                      userName: text(userName),
+                      departmentId: Number.isFinite(deptId) ? deptId : null,
+                      departmentName: text(deptName)
+                    });
+                  }
+                }
+              }
+            }
+
+            return JSON.stringify(null);
           } catch { return JSON.stringify(null); }
+        })()
+        """;
+
+    private const string CurrentUserAsyncScript = """
+        (async () => {
+          try {
+            const text = value => value == null || String(value).trim() === '' ? null : String(value).trim();
+            let userId = Number(globalThis.userID);
+            let userName = globalThis.Username;
+            let deptId = Number(globalThis.UserDept);
+            let deptName = globalThis.DepartmentName;
+
+            if (Number.isInteger(userId) && userId > 0) {
+              return JSON.stringify({
+                userId,
+                userName: text(userName),
+                departmentId: Number.isFinite(deptId) ? deptId : null,
+                departmentName: text(deptName)
+              });
+            }
+
+            try {
+              const resp = await fetch('/ihub/list?tab=2', { credentials: 'same-origin', cache: 'no-store' });
+              if (resp.ok) {
+                const html = await resp.text();
+                const uidM = html.match(/(?:var\s+|window\.)?userID\s*=\s*['"]?(\d+)['"]?/i);
+                const unameM = html.match(/(?:var\s+|window\.)?Username\s*=\s*['"]([^'"]+)['"]/i);
+                const udeptM = html.match(/(?:var\s+|window\.)?UserDept\s*=\s*['"]?(\d+)['"]?/i);
+                const dnameM = html.match(/(?:var\s+|window\.)?DepartmentName\s*=\s*['"]([^'"]+)['"]/i);
+                if (uidM && uidM[1]) {
+                  userId = Number(uidM[1]);
+                  userName = unameM ? unameM[1] : null;
+                  deptId = udeptM ? Number(udeptM[1]) : null;
+                  deptName = dnameM ? dnameM[1] : null;
+                  if (Number.isInteger(userId) && userId > 0) {
+                    return JSON.stringify({
+                      userId,
+                      userName: text(userName),
+                      departmentId: Number.isFinite(deptId) ? deptId : null,
+                      departmentName: text(deptName)
+                    });
+                  }
+                }
+              }
+            } catch {}
+
+            return JSON.stringify(null);
+          } catch {
+            return JSON.stringify(null);
+          }
         })()
         """;
 
@@ -1564,6 +1791,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             var root = document.RootElement;
             if (root.ValueKind == JsonValueKind.String) return DeserializeLatestEmail(root.GetString() ?? "null");
             if (root.ValueKind != JsonValueKind.Object) return null;
+            if (root.TryGetProperty("error", out var error))
+                throw new InvalidOperationException(error.GetString() ?? "Không thể đọc email FTMS.");
             string? ReadString(string name) => root.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null
                 ? value.ToString() : null;
             var sentAtText = ReadString("sentAt");
@@ -1575,23 +1804,88 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
     private static IReadOnlyList<TicketSnapshot> DeserializeTickets(string json)
     {
-        if (string.IsNullOrWhiteSpace(json) || json == "null") return [];
+        if (string.IsNullOrWhiteSpace(json))
+            throw new InvalidOperationException("FTMS API không trả về dữ liệu.");
+
         try
         {
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
-            if (root.ValueKind == JsonValueKind.String) return DeserializeTickets(root.GetString() ?? "null");
+            if (root.ValueKind == JsonValueKind.String)
+                return DeserializeTickets(root.GetString() ?? string.Empty);
             if (root.ValueKind == JsonValueKind.Array)
-                return JsonSerializer.Deserialize<List<TicketSnapshot>>(root.GetRawText(), JsonOptions) ?? [];
-            if (root.ValueKind == JsonValueKind.Object)
+                return DeserializeTicketsList(root);
+            if (root.ValueKind == JsonValueKind.Object &&
+                (root.TryGetProperty("data", out var data) || root.TryGetProperty("Data", out data)) &&
+                data.ValueKind == JsonValueKind.Array)
             {
-                if (root.TryGetProperty("data", out var data) || root.TryGetProperty("Data", out data))
-                    return data.ValueKind == JsonValueKind.Array
-                        ? JsonSerializer.Deserialize<List<TicketSnapshot>>(data.GetRawText(), JsonOptions) ?? []
-                        : [];
+                return DeserializeTicketsList(data);
             }
         }
-        catch (JsonException) { }
-        return [];
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("FTMS API trả về JSON không hợp lệ.", ex);
+        }
+
+        throw new InvalidOperationException("FTMS API không trả về danh sách dữ liệu.");
+    }
+
+    private static List<TicketSnapshot> DeserializeTicketsList(JsonElement arrayElement)
+    {
+        var list = new List<TicketSnapshot>();
+        foreach (var element in arrayElement.EnumerateArray())
+        {
+            try
+            {
+                var ticket = JsonSerializer.Deserialize<TicketSnapshot>(element.GetRawText(), JsonOptions);
+                if (ticket is not null && !string.IsNullOrWhiteSpace(ticket.Code))
+                    list.Add(ticket);
+            }
+            catch (JsonException)
+            {
+                var fallback = TryDeserializeTicketResilient(element);
+                if (fallback is not null && !string.IsNullOrWhiteSpace(fallback.Code))
+                    list.Add(fallback);
+            }
+        }
+        return list;
+    }
+
+    private static TicketSnapshot? TryDeserializeTicketResilient(JsonElement el)
+    {
+        if (el.ValueKind != JsonValueKind.Object) return null;
+        string? GetStr(string name) => el.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+        long? GetLong(string name) => el.TryGetProperty(name, out var p) && p.TryGetInt64(out var v) ? v : null;
+        int? GetInt(string name) => el.TryGetProperty(name, out var p) && p.TryGetInt32(out var v) ? v : null;
+        DateTimeOffset? GetDate(string name)
+        {
+            var s = GetStr(name);
+            return DateTimeOffset.TryParse(s, out var d) ? d : null;
+        }
+
+        var code = GetStr("code") ?? GetStr("Code");
+        if (string.IsNullOrWhiteSpace(code)) return null;
+
+        var statusInt = GetInt("status") ?? GetInt("Status") ?? 0;
+        var status = Enum.IsDefined(typeof(TicketStatus), statusInt) ? (TicketStatus)statusInt : TicketStatus.New;
+
+        return new TicketSnapshot
+        {
+            Code = code.Trim(),
+            Status = status,
+            Title = GetStr("title") ?? GetStr("Title"),
+            CreatedAt = GetDate("createdAt") ?? GetDate("CreatedAt"),
+            UpdatedAt = GetDate("updatedAt") ?? GetDate("UpdatedAt"),
+            UpdatedBy = GetStr("updatedBy") ?? GetStr("UpdatedBy"),
+            ClosedAt = GetDate("closedAt") ?? GetDate("ClosedAt"),
+            ClosedByUserId = GetLong("closedByUserId") ?? GetLong("ClosedByUserId"),
+            ClosedByName = GetStr("closedByName") ?? GetStr("ClosedByName"),
+            AssigneeId = GetLong("assigneeId") ?? GetLong("AssigneeId"),
+            AssigneeName = GetStr("assigneeName") ?? GetStr("AssigneeName"),
+            DepartmentId = GetLong("departmentId") ?? GetLong("DepartmentId"),
+            DepartmentName = GetStr("departmentName") ?? GetStr("DepartmentName"),
+            SlaDeviationMinutes = GetInt("slaDeviationMinutes") ?? GetInt("SlaDeviationMinutes"),
+            SlaType = GetInt("slaType") ?? GetInt("SlaType")
+        };
     }
 }

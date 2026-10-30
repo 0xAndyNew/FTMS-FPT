@@ -71,13 +71,13 @@ public sealed class TelegramOutboxSender(
         if (string.IsNullOrWhiteSpace(telegram.Token) || string.IsNullOrWhiteSpace(telegram.ChatId))
             return null;
 
-        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=True;Default Timeout=5");
         await connection.OpenAsync(ct);
         var command = connection.CreateCommand();
         command.CommandText = """
             SELECT outbox.id,outbox.event_key,outbox.message,outbox.attempt_count
             FROM notification_outbox outbox
-            JOIN ticket_events event ON event.event_key=outbox.event_key
+            LEFT JOIN ticket_events event ON event.event_key=outbox.event_key
             WHERE outbox.sent_at IS NULL AND outbox.next_attempt_at<=$now
             ORDER BY CASE event.event_type
                 WHEN 'Created' THEN 0
@@ -255,12 +255,12 @@ public sealed class TelegramOutboxSender(
                 return false;
         }
 
-        if (Regex.IsMatch(decodedMessage, @"Trạng thái:</b>\s*(?:[^\r\n]*➔\s*)?(?:Đang thực hiện|Tạm ngưng|Hoàn thành|Đã đóng|Đã hủy|Không xử lý)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(decodedMessage, @"(?:Trạng thái|Chuyển trạng thái|Trạng thái hiện tại):</b>\s*(?:[^\r\n]*➔\s*)?(?:Đang thực hiện|Tạm ngưng|Hoàn thành|Đã đóng|Đã hủy|Không xử lý)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase))
             return false;
 
         return decodedMessage.Contains("Ticket mới", StringComparison.OrdinalIgnoreCase) ||
             decodedMessage.Contains("Nhắc ticket chưa được nhận", StringComparison.OrdinalIgnoreCase) ||
-            Regex.IsMatch(decodedMessage, @"Trạng thái:</b>\s*(?:[^\r\n]*➔\s*)?(?:Tạo mới|Phân công)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase);
+            Regex.IsMatch(decodedMessage, @"(?:Trạng thái|Chuyển trạng thái|Trạng thái hiện tại):</b>\s*(?:[^\r\n]*➔\s*)?(?:Tạo mới|Phân công)\s*(?:\r?\n|$)", RegexOptions.IgnoreCase);
     }
 
     public static bool CanPauseTicket(TicketEvent? evt, string decodedMessage, long? currentUserId)
@@ -318,6 +318,8 @@ public sealed class TelegramOutboxSender(
         {
             try
             {
+                using var editCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                editCts.CancelAfter(TimeSpan.FromSeconds(3));
                 var payload = new
                 {
                     chat_id = chatId,
@@ -331,8 +333,8 @@ public sealed class TelegramOutboxSender(
                     }
                 };
                 using var response = await PostTelegramAsync(
-                    $"https://api.telegram.org/bot{token}/editMessageReplyMarkup", payload, ct);
-                await EnsureTelegramSuccessAsync(response, ct);
+                    $"https://api.telegram.org/bot{token}/editMessageReplyMarkup", payload, editCts.Token);
+                await EnsureTelegramSuccessAsync(response, editCts.Token);
                 return messageId;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -396,42 +398,6 @@ public sealed class TelegramOutboxSender(
         command.Parameters.AddWithValue("$id", id);
         command.Parameters.AddWithValue("$now", DateTimeOffset.Now.ToString("O"));
         await command.ExecuteNonQueryAsync(ct);
-
-        var ticketCommand = connection.CreateCommand();
-        ticketCommand.Transaction = transaction;
-        ticketCommand.CommandText = "SELECT ticket_code FROM ticket_events WHERE event_key=$eventKey";
-        ticketCommand.Parameters.AddWithValue("$eventKey", eventKey);
-        var ticketCode = (string?)await ticketCommand.ExecuteScalarAsync(ct);
-        if (!string.IsNullOrWhiteSpace(ticketCode))
-        {
-            var canCleanup = connection.CreateCommand();
-            canCleanup.Transaction = transaction;
-            canCleanup.CommandText = """
-                SELECT CASE WHEN
-                    EXISTS(SELECT 1 FROM ticket_events WHERE ticket_code=$code AND event_type='Terminal') AND
-                    NOT EXISTS(
-                        SELECT 1 FROM notification_outbox pending
-                        JOIN ticket_events pending_event ON pending_event.event_key=pending.event_key
-                        WHERE pending_event.ticket_code=$code AND pending.sent_at IS NULL
-                    )
-                THEN 1 ELSE 0 END
-                """;
-            canCleanup.Parameters.AddWithValue("$code", ticketCode);
-            if (Convert.ToInt32(await canCleanup.ExecuteScalarAsync(ct)) == 1)
-            {
-                var cleanup = connection.CreateCommand();
-                cleanup.Transaction = transaction;
-                cleanup.CommandText = """
-                    DELETE FROM notification_outbox WHERE event_key IN (
-                        SELECT event_key FROM ticket_events WHERE ticket_code=$code
-                    );
-                    DELETE FROM ticket_events WHERE ticket_code=$code;
-                    DELETE FROM ticket_snapshots WHERE code=$code;
-                    """;
-                cleanup.Parameters.AddWithValue("$code", ticketCode);
-                await cleanup.ExecuteNonQueryAsync(ct);
-            }
-        }
         await transaction.CommitAsync(ct);
     }
 

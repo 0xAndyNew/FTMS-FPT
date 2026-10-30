@@ -168,6 +168,93 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task Poll_TransientEmailFailure_DoesNotPersistCreatedUntilNextPollSucceeds()
+    {
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var ticket = new TicketSnapshot
+        {
+            Code = "RQ-CREATED-RECOVERY",
+            Status = TicketStatus.New,
+            Title = "Tiêu đề kiểm thử",
+            CreatedAt = now,
+            UpdatedAt = now,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+        var email = new LatestEmail("201", now, "customer@example.com",
+            ticket.Title, "Nội dung email sau khi FTMS phục hồi");
+        var client = new FakeFtmsClient(null, [ticket])
+        {
+            LatestEmailByCall = (call, _) => call <= 2
+                ? Task.FromException<LatestEmail?>(new InvalidOperationException("FTMS email API unavailable"))
+                : Task.FromResult<LatestEmail?>(email)
+        };
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            monitor.SyncNowAsync(CancellationToken.None));
+
+        Assert.Empty(store.SavedEvents);
+        Assert.Empty(store.SavedMessages);
+        Assert.DoesNotContain(store.SavedSnapshots, item => item.Code == ticket.Code);
+
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var createdEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == ticket.Code && item.EventType == TicketEventType.Created);
+        Assert.Equal(email.Body, createdEvent.LatestEmail?.Body);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains(email.Body!, message);
+    }
+
+    [Fact]
+    public async Task Poll_NullListEmail_PreservesTrackedEmailAndResponseReminderState()
+    {
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var email = new LatestEmail("301", now.AddMinutes(-1), "customer@example.com",
+            "Tiêu đề kiểm thử", "Nội dung email đã lưu");
+        var tracked = new TicketSnapshot
+        {
+            Code = "RQ-PRESERVE-EMAIL",
+            Status = TicketStatus.InProgress,
+            Title = email.Subject,
+            CreatedAt = now.AddHours(-1),
+            UpdatedAt = now,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 42,
+            AssigneeName = "closer.user",
+            LatestEmail = email,
+            ResponseReminderEmailId = email.Id,
+            ResponseReminderSince = now.AddMinutes(-1)
+        };
+        var rawListTicket = tracked with
+        {
+            LatestEmail = null,
+            ResponseReminderEmailId = null,
+            ResponseReminderSince = null
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(42, "closer.user", null, null), [rawListTicket]);
+        var store = new MemoryStore();
+        store.InitialSnapshots[tracked.Code] = tracked;
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var preserved = Assert.Single(monitor.GetActiveSnapshots(), item => item.Code == tracked.Code);
+        Assert.Equal(email.Body, preserved.LatestEmail?.Body);
+        Assert.Equal(email.Id, preserved.ResponseReminderEmailId);
+        Assert.Equal(tracked.ResponseReminderSince, preserved.ResponseReminderSince);
+        Assert.Equal(0, client.GetLatestEmailCallCount);
+    }
+
+    [Fact]
     public async Task SyncNow_WithForceHistory_ImmediatelyFetchesHistory()
     {
         var user = new CurrentUserIdentity(42, "closer.user", null, null);
@@ -269,6 +356,72 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task Poll_ResponseStatusUsesNewestEmailFromHistoryInsteadOfCompleteCachedEmail()
+    {
+        var oldEmail = new LatestEmail("2952340",
+            new DateTimeOffset(2026, 10, 9, 12, 47, 57, TimeSpan.FromHours(7)),
+            "DuyBD4@fpt.com", "Tiêu đề phản hồi cũ", "Nội dung phản hồi cũ của Duy");
+        var newEmail = new LatestEmail("2952401",
+            new DateTimeOffset(2026, 10, 9, 13, 44, 9, TimeSpan.FromHours(7)),
+            "chiennh29@ghtk.co", "Tiêu đề phản hồi mới", "Nội dung phản hồi mới nhất của Chien");
+        var changedAt = new DateTimeOffset(2026, 10, 9, 13, 44, 26, TimeSpan.FromHours(7));
+        var paused = new TicketSnapshot
+        {
+            Code = "RQ202610090190",
+            Status = TicketStatus.Paused,
+            Title = "Tiêu đề ticket",
+            CreatedAt = changedAt.AddHours(-1),
+            UpdatedAt = changedAt.AddMinutes(-5),
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 42,
+            AssigneeName = "HieuDX2",
+            LatestEmail = oldEmail
+        };
+        var resumed = paused with
+        {
+            Status = TicketStatus.InProgress,
+            UpdatedAt = changedAt
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(42, "HieuDX2", null, null), [resumed])
+        {
+            LatestEmail = newEmail
+        };
+        var store = new MemoryStore();
+        store.InitialSnapshots[paused.Code] = paused;
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var statusEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == paused.Code && item.EventType == TicketEventType.StatusChanged);
+        Assert.Equal(1, client.GetLatestEmailCallCount);
+        Assert.Equal("Tự động mở lại do có phản hồi mới", statusEvent.Reason);
+        Assert.Equal(newEmail, statusEvent.LatestEmail);
+        Assert.Equal(newEmail, statusEvent.Snapshot.LatestEmail);
+        var emailEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == paused.Code && item.EventType == TicketEventType.EmailReceived);
+        Assert.Equal(newEmail, emailEvent.LatestEmail);
+        Assert.Equal(newEmail, monitor.GetActiveSnapshots().Single(item =>
+            item.Code == paused.Code).LatestEmail);
+
+        Assert.Equal(2, store.SavedMessages.Count);
+        var statusMsg = Assert.Single(store.SavedMessages, m => m.Contains("CHUYỂN TRẠNG THÁI TICKET"));
+        Assert.Contains("Chuyển trạng thái:</b> Tạm ngưng ➔ Đang thực hiện", statusMsg);
+        Assert.Contains("Tự động mở lại do c&#243; phản hồi mới", statusMsg);
+        Assert.Contains("<blockquote>", statusMsg);
+
+        var emailMsg = Assert.Single(store.SavedMessages, m => m.Contains("CÓ EMAIL PHẢN HỒI MỚI"));
+        Assert.Contains("From: chiennh29@ghtk.co", emailMsg);
+        Assert.Contains("Time: 13:44:09 09/10/2026", emailMsg);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(newEmail.Body!), emailMsg);
+        Assert.DoesNotContain("DuyBD4@fpt.com", emailMsg);
+        Assert.DoesNotContain(System.Net.WebUtility.HtmlEncode(oldEmail.Body!), emailMsg);
+    }
+
+    [Fact]
     public async Task ApplyConfirmedStatusMutation_ImmediatelyEnqueuesEventAndPreventsRollback()
     {
         var ticket = new TicketSnapshot
@@ -349,6 +502,136 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task Poll_ClaimWithDelayedMetadata_EmitsOneRecipientNotification()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var unassigned = new TicketSnapshot
+        {
+            Code = "RQ202610090244",
+            Status = TicketStatus.Assigned,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = null,
+            AssigneeName = null
+        };
+        var assignedWithoutMetadata = unassigned with
+        {
+            AssigneeId = 2962,
+            DepartmentId = null,
+            DepartmentName = null
+        };
+        var assignedWithNameAndPause = unassigned with
+        {
+            Status = TicketStatus.Paused,
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2"
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, departmentName), [unassigned]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        client.CurrentTickets = [assignedWithoutMetadata];
+        await monitor.SyncNowAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        client.CurrentTickets = [assignedWithNameAndPause];
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var claimEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == unassigned.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(2962, claimEvent.Snapshot.AssigneeId);
+        Assert.Equal("HieuDX2", claimEvent.Snapshot.AssigneeName);
+        Assert.Equal(86016, claimEvent.Snapshot.DepartmentId);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CÓ NGƯỜI NHẬN", message);
+        Assert.Contains("Chưa nhận ➔ HieuDX2", message);
+        Assert.DoesNotContain("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+        Assert.DoesNotContain("🏢 <b>Phòng ban:</b>", message);
+        Assert.DoesNotContain(store.SavedEvents, item =>
+            item.TicketCode == unassigned.Code && item.EventType == TicketEventType.StatusChanged);
+    }
+
+    [Fact]
+    public async Task Poll_GenuineDepartmentChange_StillEmitsDepartmentNotification()
+    {
+        var tocDepartment = "TOC - Phòng Dịch vụ Data Center";
+        var previous = new TicketSnapshot
+        {
+            Code = "RQ-DEPARTMENT-TRANSFER",
+            Status = TicketStatus.InProgress,
+            DepartmentId = 86017,
+            DepartmentName = "Phòng ban khác",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2"
+        };
+        var transferred = previous with
+        {
+            DepartmentId = 86016,
+            DepartmentName = tocDepartment
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, tocDepartment), [transferred]);
+        var store = new MemoryStore();
+        store.InitialSnapshots[previous.Code] = previous;
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var assignmentEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == previous.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(86017, assignmentEvent.PreviousDepartmentId);
+        Assert.Equal(86016, assignmentEvent.Snapshot.DepartmentId);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+        Assert.Contains("Phòng ban:</b>", message);
+    }
+
+    [Fact]
+    public async Task Poll_GenuineAssigneeTransfer_StillEmitsHandlerNotification()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var previous = new TicketSnapshot
+        {
+            Code = "RQ-ASSIGNEE-TRANSFER",
+            Status = TicketStatus.InProgress,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = 100,
+            AssigneeName = "OldUser"
+        };
+        var transferred = previous with
+        {
+            AssigneeId = 200,
+            AssigneeName = "NewUser"
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, departmentName), [transferred]);
+        var store = new MemoryStore();
+        store.InitialSnapshots[previous.Code] = previous;
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var assignmentEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == previous.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(100, assignmentEvent.PreviousAssigneeId);
+        Assert.Equal(200, assignmentEvent.Snapshot.AssigneeId);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CHUYỂN NGƯỜI XỬ LÝ", message);
+        Assert.DoesNotContain("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+    }
+
+    [Fact]
     public async Task ApplyConfirmedAssignmentMutation_ImmediatelyEnqueuesAssignmentEventAndPreventsRollback()
     {
         var ticket = new TicketSnapshot
@@ -387,6 +670,51 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task ApplyConfirmedAssignmentMutation_TelegramClaimCoalescesAutomaticPause()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var ticket = new TicketSnapshot
+        {
+            Code = "RQ-MUT-TELEGRAM-CLAIM",
+            Status = TicketStatus.Assigned,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = null,
+            AssigneeName = "---"
+        };
+        var paused = ticket with
+        {
+            Status = TicketStatus.Paused,
+            AssigneeId = 42,
+            AssigneeName = "duy.user"
+        };
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(42, "duy.user", 86016, departmentName), [ticket]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        await monitor.ApplyConfirmedAssignmentMutationAsync(ticket.Code, 42,
+            null, null, null, CancellationToken.None);
+        client.CurrentTickets = [paused];
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var claimEvent = Assert.Single(store.SavedEvents, item =>
+            item.TicketCode == ticket.Code && item.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal("duy.user", claimEvent.Snapshot.AssigneeName);
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CÓ NGƯỜI NHẬN", message);
+        Assert.DoesNotContain("TICKET ĐÃ CHUYỂN PHÒNG BAN", message);
+        Assert.DoesNotContain(store.SavedEvents, item =>
+            item.TicketCode == ticket.Code && item.EventType == TicketEventType.StatusChanged);
+    }
+
+    [Fact]
     public async Task TriggerSync_WakesUpRunAsyncImmediatelyWithoutWaitingInterval()
     {
         var client = new FakeFtmsClient(null, []);
@@ -413,6 +741,210 @@ public sealed class TicketMonitorTests
 
         cts.Cancel();
         try { await runTask; } catch (OperationCanceledException) { }
+    }
+
+    [Fact]
+    public async Task TicketCreatedToday_WhenObservedFirstTimeAsInProgress_EmitsCreatedEvent()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var todayTicket = new TicketSnapshot
+        {
+            Code = $"RQ{vnNow:yyyyMMdd}0045",
+            Status = TicketStatus.InProgress,
+            Title = "Ticket tạo hôm nay nhưng đã InProgress trong thời gian tắt app",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            CreatedAt = vnNow.AddMinutes(-30),
+            UpdatedAt = vnNow.AddMinutes(-10)
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", 86016, todayTicket.DepartmentName), [todayTicket]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var createdEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == todayTicket.Code && e.EventType == TicketEventType.Created);
+        Assert.Equal(TicketStatus.InProgress, createdEvent.Snapshot.Status);
+        Assert.Equal(2962, createdEvent.Snapshot.AssigneeId);
+        Assert.Equal("HieuDX2", createdEvent.Snapshot.AssigneeName);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET MỚI", message);
+        Assert.Contains("Trạng thái:</b> Đang thực hiện", message);
+        Assert.Contains("Người xử lý:</b> HieuDX2", message);
+    }
+
+    [Fact]
+    public async Task TicketCreatedToday_WhenObservedFirstTimeAsPaused_EmitsCreatedEvent()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var todayPaused = new TicketSnapshot
+        {
+            Code = $"RQ{vnNow:yyyyMMdd}0050",
+            Status = TicketStatus.Paused,
+            Title = "Ticket tạo hôm nay nhưng đã tạm ngưng",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            CreatedAt = vnNow.AddMinutes(-20),
+            UpdatedAt = vnNow.AddMinutes(-5)
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", 86016, todayPaused.DepartmentName), [todayPaused]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var createdEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == todayPaused.Code && e.EventType == TicketEventType.Created);
+        Assert.Equal(TicketStatus.Paused, createdEvent.Snapshot.Status);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET MỚI", message);
+        Assert.Contains("Trạng thái:</b> Tạm ngưng", message);
+        Assert.Contains("Người xử lý:</b> HieuDX2", message);
+    }
+
+    [Fact]
+    public async Task TicketCreatedYesterday_WhenObservedFirstTimeAsInProgress_DoesNotEmitCreated_EmitsStatusChangedWhenResumed()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var yesterday = vnNow.AddDays(-1);
+        var yesterdayTicket = new TicketSnapshot
+        {
+            Code = $"RQ{yesterday:yyyyMMdd}0099",
+            Status = TicketStatus.InProgress,
+            Title = "Ticket từ hôm trước đang InProgress khi cold start",
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            CreatedAt = yesterday,
+            UpdatedAt = vnNow.AddHours(-2)
+        };
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", 86016, yesterdayTicket.DepartmentName), [yesterdayTicket]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Cold start of older InProgress ticket must be baselined: NO Created event emitted
+        Assert.Empty(store.SavedEvents);
+        Assert.Empty(store.SavedMessages);
+
+        // Subsequent poll: status changes to Paused -> MUST emit StatusChanged
+        var pausedTicket = yesterdayTicket with
+        {
+            Status = TicketStatus.Paused,
+            UpdatedAt = vnNow
+        };
+        client.CurrentTickets = [pausedTicket];
+
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var statusEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == yesterdayTicket.Code);
+        Assert.Equal(TicketEventType.StatusChanged, statusEvent.EventType);
+        Assert.Equal(TicketStatus.InProgress, statusEvent.PreviousStatus);
+        Assert.Equal(TicketStatus.Paused, statusEvent.CurrentStatus);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("CHUYỂN TRẠNG THÁI TICKET", message);
+        Assert.Contains("Chuyển trạng thái:</b> Đang thực hiện ➔ Tạm ngưng", message);
+    }
+
+    [Fact]
+    public async Task Poll_UnpausingEmail_ArmsResponseReminderAndFiresAtFiveMinutes()
+    {
+        var sentAt = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)).AddMinutes(-6);
+        var oldEmail = new LatestEmail("1001", sentAt.AddHours(-2), "customer@example.com", "Tiêu đề cũ", "Nội dung cũ");
+        var newEmail = new LatestEmail("1002", sentAt, "customer@example.com", "Tiêu đề phản hồi", "Khách hàng phản hồi mở lại ticket");
+
+        var paused = new TicketSnapshot
+        {
+            Code = "RQ-UNPAUSE-REMINDER",
+            Status = TicketStatus.Paused,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            LatestEmail = oldEmail,
+            CreatedAt = sentAt.AddHours(-3),
+            UpdatedAt = sentAt.AddHours(-1)
+        };
+        var resumed = paused with
+        {
+            Status = TicketStatus.InProgress,
+            UpdatedAt = sentAt
+        };
+
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", null, null), [resumed])
+        {
+            LatestEmail = newEmail
+        };
+        var store = new MemoryStore();
+        store.InitialSnapshots[paused.Code] = paused;
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Transition from Paused to InProgress with new email should arm ResponseReminder
+        var activeSnapshot = monitor.GetActiveSnapshots().Single(s => s.Code == paused.Code);
+        Assert.Equal("1002", activeSnapshot.ResponseReminderEmailId);
+        Assert.Equal(sentAt, activeSnapshot.ResponseReminderSince);
+
+        // Next poll: 6 minutes have passed since sentAt -> should fire ResponseReminder at 5-minute milestone
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        var reminder = Assert.Single(store.SavedEvents, e => e.TicketCode == paused.Code && e.EventType == TicketEventType.ResponseReminder);
+        Assert.Contains("6 phút", reminder.Reason);
+        Assert.Contains((paused.Code, "ResponseReminder", "response-1002-1"), store.RecordedNotifications);
+
+        var reminderMsg = Assert.Single(store.SavedMessages);
+        Assert.Contains("TICKET ĐÃ CÓ PHẢN HỒI MỚI", reminderMsg);
+        Assert.Contains("Thời gian từ lúc có phản hồi mới:</b> 6 phút", reminderMsg);
+    }
+
+    [Fact]
+    public async Task Poll_SubsequentEmailOnSameTicket_DoesNotGetBlockedByLedgerOfFirstEmail()
+    {
+        var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var ticketCode = "RQ-MULTI-EMAIL";
+        var email1 = new LatestEmail("2001", vnNow.AddHours(-2), "customer@example.com", "Email 1", "Nội dung 1");
+        var email2 = new LatestEmail("2002", vnNow.AddMinutes(-7), "customer@example.com", "Email 2", "Nội dung 2");
+
+        var client = new FakeFtmsClient(new CurrentUserIdentity(2962, "HieuDX2", null, null), []);
+        var store = new MemoryStore();
+
+        // Simulate that email 1 already triggered and recorded milestone 1 in ledger
+        await store.RecordNotificationAsync(ticketCode, "ResponseReminder", "response-2001-1", CancellationToken.None);
+
+        var tracked = new TicketSnapshot
+        {
+            Code = ticketCode,
+            Status = TicketStatus.InProgress,
+            DepartmentName = "TOC - Phòng Dịch vụ Data Center",
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2",
+            LatestEmail = email2,
+            ResponseReminderEmailId = email2.Id,
+            ResponseReminderSince = email2.SentAt
+        };
+        client.CurrentTickets = [tracked];
+        store.InitialSnapshots[ticketCode] = tracked;
+
+        var monitor = new TicketMonitor(client, store, new NullSender(), new TicketChangeDetector(), new AppSettings());
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Because discriminator is "response-2002-1" and NOT "response-2001-1", it must NOT be blocked!
+        var reminder = Assert.Single(store.SavedEvents, e => e.TicketCode == ticketCode && e.EventType == TicketEventType.ResponseReminder);
+        Assert.Contains("7 phút", reminder.Reason);
+        Assert.Contains((ticketCode, "ResponseReminder", "response-2002-1"), store.RecordedNotifications);
     }
 
     private static TicketSnapshot Closed(string code, DateTimeOffset closedAt, long? closedById,
@@ -442,6 +974,7 @@ public sealed class TicketMonitorTests
         public IReadOnlyList<TicketSnapshot> CurrentClosedTickets { get; set; } = closedTickets ?? [];
         public Func<int, IReadOnlyList<TicketSnapshot>>? TicketsByCall { get; set; }
         public LatestEmail? LatestEmail { get; set; }
+        public Func<int, CancellationToken, Task<LatestEmail?>>? LatestEmailByCall { get; set; }
         public int GetLatestEmailCallCount { get; private set; }
 
         public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken) => Task.FromResult(true);
@@ -475,7 +1008,8 @@ public sealed class TicketMonitorTests
         public Task<LatestEmail?> GetLatestEmailAsync(string ticketCode, CancellationToken cancellationToken)
         {
             GetLatestEmailCallCount++;
-            return Task.FromResult(LatestEmail);
+            return LatestEmailByCall?.Invoke(GetLatestEmailCallCount, cancellationToken) ??
+                Task.FromResult(LatestEmail);
         }
         public Task<StatusHistoryEntry?> GetLatestStatusHistoryAsync(string ticketCode, TicketStatus status, CancellationToken cancellationToken) =>
             Task.FromResult<StatusHistoryEntry?>(null);
@@ -485,13 +1019,21 @@ public sealed class TicketMonitorTests
     private sealed class MemoryStore : ITicketStore
     {
         public int CleanupCallCount { get; private set; }
+        public Dictionary<string, TicketSnapshot> InitialSnapshots { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
         public List<TicketEvent> SavedEvents { get; } = [];
         public List<TicketSnapshot> SavedSnapshots { get; } = [];
+        public List<string> SavedMessages { get; } = [];
 
         public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<IReadOnlyDictionary<string, TicketSnapshot>> LoadActiveSnapshotsAsync(CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyDictionary<string, TicketSnapshot>>(new Dictionary<string, TicketSnapshot>());
-        public Task SaveSnapshotAsync(TicketSnapshot snapshot, CancellationToken cancellationToken) => Task.CompletedTask;
+            Task.FromResult<IReadOnlyDictionary<string, TicketSnapshot>>(
+                new Dictionary<string, TicketSnapshot>(InitialSnapshots, StringComparer.OrdinalIgnoreCase));
+        public Task SaveSnapshotAsync(TicketSnapshot snapshot, CancellationToken cancellationToken)
+        {
+            SavedSnapshots.Add(snapshot);
+            return Task.CompletedTask;
+        }
         public Task SaveSnapshotsAsync(IReadOnlyList<TicketSnapshot> snapshots, CancellationToken cancellationToken)
         {
             SavedSnapshots.AddRange(snapshots);
@@ -507,6 +1049,7 @@ public sealed class TicketMonitorTests
         public Task SaveEventAndEnqueueNotificationAsync(TicketEvent ticketEvent, string? message, CancellationToken cancellationToken)
         {
             SavedEvents.Add(ticketEvent);
+            if (!string.IsNullOrWhiteSpace(message)) SavedMessages.Add(message);
             return Task.CompletedTask;
         }
         public Task SaveSnapshotAndEventsAsync(TicketSnapshot snapshot,
@@ -514,11 +1057,19 @@ public sealed class TicketMonitorTests
         {
             SavedSnapshots.Add(snapshot);
             SavedEvents.AddRange(events.Select(item => item.Event));
+            SavedMessages.AddRange(events.Where(item => !string.IsNullOrWhiteSpace(item.Message))
+                .Select(item => item.Message!));
             return Task.CompletedTask;
         }
+        public HashSet<(string Code, string Type, string Disc)> RecordedNotifications { get; } = [];
         public Task MarkTerminalAsync(string code, DateTimeOffset terminalAt, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.FromResult(false);
-        public Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<bool> HasNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken) =>
+            Task.FromResult(RecordedNotifications.Contains((ticketCode, notificationType, discriminator)));
+        public Task RecordNotificationAsync(string ticketCode, string notificationType, string discriminator, CancellationToken cancellationToken)
+        {
+            RecordedNotifications.Add((ticketCode, notificationType, discriminator));
+            return Task.CompletedTask;
+        }
         public Task CleanupAsync(int retentionDays, CancellationToken cancellationToken)
         {
             CleanupCallCount++;

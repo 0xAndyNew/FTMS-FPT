@@ -153,4 +153,94 @@ public sealed class SqliteTicketStoreTests : IDisposable
             Assert.Equal(0, Convert.ToInt32(await outboxCmd.ExecuteScalarAsync()));
         }
     }
+
+    [Fact]
+    public async Task OutboxQuery_WithLeftJoin_PicksUpItemEvenWhenEventRecordIsMissing()
+    {
+        await _store.InitializeAsync(CancellationToken.None);
+
+        // Insert directly into outbox without an entry in ticket_events (orphaned outbox row)
+        await using var conn = new SqliteConnection($"Data Source={_dbPath};Pooling=True;Default Timeout=5");
+        await conn.OpenAsync();
+        var insertCmd = conn.CreateCommand();
+        insertCmd.CommandText = """
+            INSERT INTO notification_outbox(event_key, message, next_attempt_at)
+            VALUES('ORPHAN-KEY', 'Orphaned message', $now);
+            """;
+        insertCmd.Parameters.AddWithValue("$now", DateTimeOffset.Now.ToString("O"));
+        await insertCmd.ExecuteNonQueryAsync();
+
+        // Query using the same query as TelegramOutboxSender
+        var queryCmd = conn.CreateCommand();
+        queryCmd.CommandText = """
+            SELECT outbox.id,outbox.event_key,outbox.message,outbox.attempt_count
+            FROM notification_outbox outbox
+            LEFT JOIN ticket_events event ON event.event_key=outbox.event_key
+            WHERE outbox.sent_at IS NULL AND outbox.next_attempt_at<=$now
+            ORDER BY CASE event.event_type
+                WHEN 'Created' THEN 0
+                WHEN 'StatusChanged' THEN 0
+                WHEN 'AssignmentChanged' THEN 0
+                WHEN 'Terminal' THEN 0
+                WHEN 'EmailReceived' THEN 1
+                WHEN 'SlaThresholdReached' THEN 1
+                ELSE 2 END,
+                outbox.id
+            LIMIT 1
+            """;
+        queryCmd.Parameters.AddWithValue("$now", DateTimeOffset.Now.AddSeconds(1).ToString("O"));
+
+        await using var reader = await queryCmd.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("ORPHAN-KEY", reader.GetString(1));
+        Assert.Equal("Orphaned message", reader.GetString(2));
+    }
+
+    [Fact]
+    public async Task LoadActiveSnapshotsAsync_FiltersOutCompletedAndTerminalTickets()
+    {
+        await _store.InitializeAsync(CancellationToken.None);
+
+        var active1 = new TicketSnapshot
+        {
+            Code = "RQ-ACTIVE-1",
+            Status = TicketStatus.Assigned,
+            IsTerminal = false
+        };
+        var active2 = new TicketSnapshot
+        {
+            Code = "RQ-ACTIVE-2",
+            Status = TicketStatus.InProgress,
+            IsTerminal = false
+        };
+        var active3 = new TicketSnapshot
+        {
+            Code = "RQ-ACTIVE-3",
+            Status = TicketStatus.Paused,
+            IsTerminal = false
+        };
+        var completed = new TicketSnapshot
+        {
+            Code = "RQ-COMPLETED",
+            Status = TicketStatus.Completed,
+            IsTerminal = false // Even if accidentally stored with IsTerminal=0
+        };
+        var closed = new TicketSnapshot
+        {
+            Code = "RQ-CLOSED",
+            Status = TicketStatus.Closed,
+            IsTerminal = true
+        };
+
+        await _store.SaveSnapshotsAsync([active1, active2, active3, completed, closed], CancellationToken.None);
+
+        var activeSnapshots = await _store.LoadActiveSnapshotsAsync(CancellationToken.None);
+
+        Assert.Equal(3, activeSnapshots.Count);
+        Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-1"));
+        Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-2"));
+        Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-3"));
+        Assert.False(activeSnapshots.ContainsKey("RQ-COMPLETED"));
+        Assert.False(activeSnapshots.ContainsKey("RQ-CLOSED"));
+    }
 }
