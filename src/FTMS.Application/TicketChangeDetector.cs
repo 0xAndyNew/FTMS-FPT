@@ -333,7 +333,7 @@ public sealed class TicketChangeDetector
         if (!refreshEvenWhenComplete && IsCompleteEmail(cachedLatest)) return cachedLatest;
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(refreshEvenWhenComplete ? 3 : 2));
+        timeout.CancelAfter(TimeSpan.FromSeconds(refreshEvenWhenComplete ? 5 : 4));
         LatestEmail? first = null;
         Exception? firstError = null;
         try

@@ -195,4 +195,52 @@ public sealed class SqliteTicketStoreTests : IDisposable
         Assert.Equal("ORPHAN-KEY", reader.GetString(1));
         Assert.Equal("Orphaned message", reader.GetString(2));
     }
+
+    [Fact]
+    public async Task LoadActiveSnapshotsAsync_FiltersOutCompletedAndTerminalTickets()
+    {
+        await _store.InitializeAsync(CancellationToken.None);
+
+        var active1 = new TicketSnapshot
+        {
+            Code = "RQ-ACTIVE-1",
+            Status = TicketStatus.Assigned,
+            IsTerminal = false
+        };
+        var active2 = new TicketSnapshot
+        {
+            Code = "RQ-ACTIVE-2",
+            Status = TicketStatus.InProgress,
+            IsTerminal = false
+        };
+        var active3 = new TicketSnapshot
+        {
+            Code = "RQ-ACTIVE-3",
+            Status = TicketStatus.Paused,
+            IsTerminal = false
+        };
+        var completed = new TicketSnapshot
+        {
+            Code = "RQ-COMPLETED",
+            Status = TicketStatus.Completed,
+            IsTerminal = false // Even if accidentally stored with IsTerminal=0
+        };
+        var closed = new TicketSnapshot
+        {
+            Code = "RQ-CLOSED",
+            Status = TicketStatus.Closed,
+            IsTerminal = true
+        };
+
+        await _store.SaveSnapshotsAsync([active1, active2, active3, completed, closed], CancellationToken.None);
+
+        var activeSnapshots = await _store.LoadActiveSnapshotsAsync(CancellationToken.None);
+
+        Assert.Equal(3, activeSnapshots.Count);
+        Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-1"));
+        Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-2"));
+        Assert.True(activeSnapshots.ContainsKey("RQ-ACTIVE-3"));
+        Assert.False(activeSnapshots.ContainsKey("RQ-COMPLETED"));
+        Assert.False(activeSnapshots.ContainsKey("RQ-CLOSED"));
+    }
 }

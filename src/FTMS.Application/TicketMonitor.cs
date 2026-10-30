@@ -689,12 +689,24 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 evt.Snapshot.LatestEmail is not null;
             if (!shouldResolve)
                 return (Event: evt, IsResponseTransition: false, Enriched: (LatestEmail?)null);
-            var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
-                cancellationToken, isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
-            return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: enriched);
+            try
+            {
+                var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
+                    cancellationToken, isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
+                return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: enriched);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch when (evt.EventType != TicketEventType.Created)
+            {
+                return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: evt.LatestEmail ?? evt.Snapshot.LatestEmail);
+            }
         }).ToList();
 
         var resolvedResults = await Task.WhenAll(resolveTasks);
+
         for (var i = 0; i < criticalList.Count; i++)
         {
             var (evt, isResponseTransition, enriched) = resolvedResults[i];
@@ -735,8 +747,8 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             foreach (var group in criticalEvents.GroupBy(item => item.TicketCode,
                          StringComparer.OrdinalIgnoreCase))
             {
-                var snapshot = tickets.Last(item => string.Equals(item.Code, group.Key,
-                    StringComparison.OrdinalIgnoreCase));
+                var snapshot = tickets.LastOrDefault(item => string.Equals(item.Code, group.Key,
+                    StringComparison.OrdinalIgnoreCase)) ?? group.First().Snapshot;
                 var entries = group.Select(item =>
                     (item, FormatIfNotifiable(item,
                         previousSnapshots.GetValueOrDefault(item.TicketCode))))

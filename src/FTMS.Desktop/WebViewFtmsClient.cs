@@ -307,8 +307,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
               const fetchActive = async () => {
                 const scopes = [
-                  ['0,1,2,3,4', false],
-                  ['0,1,2,3,4', true]
+                  ['1,2,4', false],
+                  ['1,2,4', true]
                 ];
                 const results = await Promise.allSettled(scopes.map(([statuses, mine]) =>
                   fetchActiveGroup(statuses, mine)));
