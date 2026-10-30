@@ -93,6 +93,8 @@ public sealed record TicketSnapshot
     public LatestEmail? LatestEmail { get; init; }
     public string? ResponseReminderEmailId { get; init; }
     public DateTimeOffset? ResponseReminderSince { get; init; }
+    public int? UnassignedReminderBucket { get; init; }
+    public int? ResponseReminderBucket { get; init; }
     public bool IsTerminal { get; init; }
 }
 

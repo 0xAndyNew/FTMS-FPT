@@ -318,6 +318,8 @@ public sealed class TelegramOutboxSender(
         {
             try
             {
+                using var editCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                editCts.CancelAfter(TimeSpan.FromSeconds(3));
                 var payload = new
                 {
                     chat_id = chatId,
@@ -331,8 +333,8 @@ public sealed class TelegramOutboxSender(
                     }
                 };
                 using var response = await PostTelegramAsync(
-                    $"https://api.telegram.org/bot{token}/editMessageReplyMarkup", payload, ct);
-                await EnsureTelegramSuccessAsync(response, ct);
+                    $"https://api.telegram.org/bot{token}/editMessageReplyMarkup", payload, editCts.Token);
+                await EnsureTelegramSuccessAsync(response, editCts.Token);
                 return messageId;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }

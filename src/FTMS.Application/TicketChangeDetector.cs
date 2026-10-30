@@ -166,10 +166,10 @@ public sealed class TicketChangeDetector
             {
                 var unassignedMinutes = Math.Max(0, (int)(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)) - snapshot.CreatedAt.Value).TotalMinutes);
                 var reminderBucket = unassignedMinutes / 5;
-                if (reminderBucket >= 1 && reminderBucket <= 6) // Chỉ nhắc tối đa 6 mốc: 5, 10, 15, 20, 25, 30 phút
+                if (reminderBucket >= 1 && reminderBucket <= 6 && old.UnassignedReminderBucket != reminderBucket) // Chỉ nhắc tối đa 6 mốc: 5, 10, 15, 20, 25, 30 phút
                 {
                     var email = await LatestEmailAsync();
-                    var enriched = snapshot with { LatestEmail = email };
+                    var enriched = snapshot with { LatestEmail = email, UnassignedReminderBucket = reminderBucket };
                     events.Add(Create(enriched, TicketEventType.UnassignedReminder, old.Status,
                         $"Ticket chưa được nhận sau {unassignedMinutes} phút", email,
                         discriminator: $"unassigned-{reminderBucket}"));
@@ -182,14 +182,15 @@ public sealed class TicketChangeDetector
             {
                 var responseMinutes = Math.Max(0, (int)(DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)) - old.ResponseReminderSince.Value).TotalMinutes);
                 var responseBucket = responseMinutes / 5;
-                if (responseBucket >= 1 && responseBucket <= 6) // Chỉ nhắc tối đa 6 mốc: 5, 10, 15, 20, 25, 30 phút
+                if (responseBucket >= 1 && responseBucket <= 6 && old.ResponseReminderBucket != responseBucket) // Chỉ nhắc tối đa 6 mốc: 5, 10, 15, 20, 25, 30 phút
                 {
                     var email = await LatestEmailAsync();
                     var enriched = snapshot with
                     {
                         LatestEmail = email,
                         ResponseReminderEmailId = old.ResponseReminderEmailId,
-                        ResponseReminderSince = old.ResponseReminderSince
+                        ResponseReminderSince = old.ResponseReminderSince,
+                        ResponseReminderBucket = responseBucket
                     };
                     events.Add(Create(enriched, TicketEventType.ResponseReminder, old.Status,
                         $"Ticket đã có phản hồi mới {responseMinutes} phút", email,
@@ -227,7 +228,7 @@ public sealed class TicketChangeDetector
             if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) && !emailIncludedInEvent)
             {
                 var listHasNewEmail = IsNewEmail(old.LatestEmail, snapshot.LatestEmail);
-                if (listHasNewEmail || old.LatestEmail is null || old.UpdatedAt != snapshot.UpdatedAt)
+                if (listHasNewEmail || old.UpdatedAt != snapshot.UpdatedAt)
                 {
                     var email = await LatestEmailAsync();
                     if (IsNewEmail(old.LatestEmail, email) && email is not null)
@@ -332,7 +333,7 @@ public sealed class TicketChangeDetector
         if (!refreshEvenWhenComplete && IsCompleteEmail(cachedLatest)) return cachedLatest;
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(7));
+        timeout.CancelAfter(TimeSpan.FromSeconds(refreshEvenWhenComplete ? 3 : 2));
         LatestEmail? first = null;
         Exception? firstError = null;
         try
@@ -353,12 +354,12 @@ public sealed class TicketChangeDetector
 
         try
         {
-            await Task.Delay(300, timeout.Token);
+            await Task.Delay(200, timeout.Token);
             var retry = await client.GetLatestEmailAsync(code, timeout.Token);
             var resolved = SelectEmail(first, retry, cachedLatest);
             if (resolved is null || IsCompleteEmail(resolved)) return resolved;
             if (IsCompleteEmail(cachedLatest)) return cachedLatest;
-            throw new InvalidOperationException($"FTMS chưa trả về đầy đủ nội dung email của {code}.");
+            return resolved;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -367,7 +368,7 @@ public sealed class TicketChangeDetector
         catch (OperationCanceledException)
         {
             if (IsCompleteEmail(cachedLatest)) return cachedLatest;
-            throw new TimeoutException($"FTMS không phản hồi email của {code} trong 7 giây.", firstError);
+            throw new TimeoutException($"FTMS không phản hồi email của {code}.", firstError);
         }
         catch when (IsCompleteEmail(cachedLatest))
         {
@@ -452,7 +453,9 @@ public sealed class TicketChangeDetector
             DepartmentId = snapshot.DepartmentId ?? previous?.DepartmentId,
             DepartmentName = !string.IsNullOrWhiteSpace(snapshot.DepartmentName)
                 ? snapshot.DepartmentName : previous?.DepartmentName,
-            Title = !string.IsNullOrWhiteSpace(previous?.Title) ? previous.Title : snapshot.Title
+            Title = !string.IsNullOrWhiteSpace(previous?.Title) ? previous.Title : snapshot.Title,
+            UnassignedReminderBucket = snapshot.UnassignedReminderBucket ?? previous?.UnassignedReminderBucket,
+            ResponseReminderBucket = snapshot.ResponseReminderBucket ?? previous?.ResponseReminderBucket
         };
 
     private static bool HasAssignedName(string? value) =>

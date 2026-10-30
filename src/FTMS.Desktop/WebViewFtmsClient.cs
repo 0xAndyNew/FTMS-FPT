@@ -307,8 +307,8 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
 
               const fetchActive = async () => {
                 const scopes = [
-                  ['1,2,4', false],
-                  ['1,2,4', true]
+                  ['0,1,2,3,4', false],
+                  ['0,1,2,3,4', true]
                 ];
                 const results = await Promise.allSettled(scopes.map(([statuses, mine]) =>
                   fetchActiveGroup(statuses, mine)));
@@ -1526,7 +1526,11 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                     (index === 0 || rows[index - 1].status !== row.status));
                   if (changes.length) {
                     const latest = changes[changes.length - 1];
-                    return JSON.stringify({ occurredAt: latest.occurredAt, actor: latest.actor, note: latest.note });
+                    return JSON.stringify({ status: latest.status, occurredAt: latest.occurredAt, actor: latest.actor, note: latest.note });
+                  }
+                  if (rows.length) {
+                    const latest = rows[rows.length - 1];
+                    return JSON.stringify({ status: latest.status, occurredAt: latest.occurredAt, actor: latest.actor, note: latest.note });
                   }
                 }
                 const editResponse = await fetch('/ihub/{{route}}/edit/' + encodeURIComponent({{code}}), {
@@ -1569,7 +1573,10 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
             var note = root.TryGetProperty("note", out var noteValue) ? noteValue.GetString() : null;
             var occurredText = root.TryGetProperty("occurredAt", out var occurredValue) ? occurredValue.GetString() : null;
             DateTimeOffset? occurredAt = DateTimeOffset.TryParse(occurredText, out var parsed) ? parsed : null;
-            return new StatusHistoryEntry(status, occurredAt, actor, note);
+            var actualStatus = root.TryGetProperty("status", out var statusValue) && statusValue.TryGetInt32(out var parsedStatus)
+                ? (TicketStatus)parsedStatus
+                : status;
+            return new StatusHistoryEntry(actualStatus, occurredAt, actor, note);
         }
         catch (JsonException) { return null; }
     }

@@ -564,7 +564,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     tickets.Add(closedSnapshot);
                 }
             }
-            else if (_missingMonitoredAttempts.TryGetValue(activeCode, out var attempts) && attempts > 3)
+            else if (_missingMonitoredAttempts.TryGetValue(activeCode, out var attempts) && attempts >= 2)
             {
                 try
                 {
@@ -574,16 +574,18 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     // Chỉ tạo Closed khi có bằng chứng authoritative từ history API
                     if (history?.OccurredAt is not null)
                     {
+                        var resolvedStatus = history.Status != TicketStatus.New ? history.Status : TicketStatus.Closed;
+                        var isTerminal = resolvedStatus.IsTerminal(settings.UnprocessedIsTerminal);
                         var fallbackClosed = _active[activeCode] with
                         {
-                            Status = TicketStatus.Closed,
+                            Status = resolvedStatus,
                             UpdatedAt = history.OccurredAt,
-                            ClosedAt = history.OccurredAt,
+                            ClosedAt = resolvedStatus == TicketStatus.Closed ? history.OccurredAt : _active[activeCode].ClosedAt,
                             ClosedByName = history.Actor,
-                            IsTerminal = true
+                            IsTerminal = isTerminal
                         };
                         tickets.Add(fallbackClosed);
-                        _closedCache[activeCode] = fallbackClosed;
+                        if (isTerminal) _closedCache[activeCode] = fallbackClosed;
                     }
                     // Nếu history trả null/không có OccurredAt → KHÔNG tạo synthetic Closed
                     // Ticket sẽ được giữ lại trong _active cho đến khi có xác nhận đóng thật
@@ -631,6 +633,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         // 2. Enrich notification events, then persist state changes.
         Dictionary<string, TicketSnapshot> previousSnapshots;
         IReadOnlyList<TicketEvent> criticalEvents;
+        List<TicketEvent> criticalList;
         await _stateLock.WaitAsync(cancellationToken);
         try
         {
@@ -651,10 +654,13 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                         : null,
                     ResponseReminderSince = keepResponseReminder
                         ? ticket.ResponseReminderSince ?? previous.ResponseReminderSince
+                        : null,
+                    ResponseReminderBucket = keepResponseReminder
+                        ? ticket.ResponseReminderBucket ?? previous.ResponseReminderBucket
                         : null
                 };
             }
-            var criticalList = detector.DetectCritical(previousSnapshots, tickets, settings).ToList();
+            criticalList = detector.DetectCritical(previousSnapshots, tickets, settings).ToList();
             foreach (var claim in criticalList.Where(item => item.EventType == TicketEventType.AssignmentChanged &&
                          item.PreviousAssigneeId is null or 0 && item.Snapshot.AssigneeId is not null and not 0))
             {
@@ -669,49 +675,62 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             {
                 _recentClaims.Remove(expiredClaim);
             }
-            var resolveTasks = criticalList.Select(async evt =>
-            {
-                var isResponseTransition = evt.EventType == TicketEventType.StatusChanged &&
-                    evt.PreviousStatus == TicketStatus.Paused &&
-                    evt.CurrentStatus == TicketStatus.InProgress;
-                var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
-                    cancellationToken, isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
-                return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: enriched);
-            }).ToList();
+        }
+        finally { _stateLock.Release(); }
 
-            var resolvedResults = await Task.WhenAll(resolveTasks);
-            for (var i = 0; i < criticalList.Count; i++)
+        var resolveTasks = criticalList.Select(async evt =>
+        {
+            var isResponseTransition = evt.EventType == TicketEventType.StatusChanged &&
+                evt.PreviousStatus == TicketStatus.Paused &&
+                evt.CurrentStatus == TicketStatus.InProgress;
+            var shouldResolve = evt.EventType == TicketEventType.Created ||
+                isResponseTransition ||
+                evt.LatestEmail is not null ||
+                evt.Snapshot.LatestEmail is not null;
+            if (!shouldResolve)
+                return (Event: evt, IsResponseTransition: false, Enriched: (LatestEmail?)null);
+            var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
+                cancellationToken, isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
+            return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: enriched);
+        }).ToList();
+
+        var resolvedResults = await Task.WhenAll(resolveTasks);
+        for (var i = 0; i < criticalList.Count; i++)
+        {
+            var (evt, isResponseTransition, enriched) = resolvedResults[i];
+            if (enriched is not null)
             {
-                var (evt, isResponseTransition, enriched) = resolvedResults[i];
-                if (enriched is not null)
+                var previousEmail = previousSnapshots.GetValueOrDefault(evt.TicketCode)?.LatestEmail;
+                var isNewResponse = isResponseTransition && TicketChangeDetector.IsNewEmail(previousEmail, enriched);
+                criticalList[i] = evt with
                 {
-                    var previousEmail = previousSnapshots.GetValueOrDefault(evt.TicketCode)?.LatestEmail;
-                    var isNewResponse = isResponseTransition && TicketChangeDetector.IsNewEmail(previousEmail, enriched);
-                    criticalList[i] = evt with
+                    Reason = isNewResponse
+                        ? "Tự động mở lại do có phản hồi mới"
+                        : evt.Reason,
+                    LatestEmail = enriched,
+                    Snapshot = evt.Snapshot with
                     {
-                        Reason = isNewResponse
-                            ? "Tự động mở lại do có phản hồi mới"
-                            : evt.Reason,
                         LatestEmail = enriched,
-                        Snapshot = evt.Snapshot with
-                        {
-                            LatestEmail = enriched,
-                            ResponseReminderEmailId = isNewResponse ? enriched.Id : evt.Snapshot.ResponseReminderEmailId,
-                            ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : evt.Snapshot.ResponseReminderSince
-                        }
-                    };
-                    var matchingTicketIdx = tickets.FindIndex(t => string.Equals(t.Code, evt.TicketCode, StringComparison.OrdinalIgnoreCase));
-                    if (matchingTicketIdx >= 0)
-                    {
-                        tickets[matchingTicketIdx] = tickets[matchingTicketIdx] with
-                        {
-                            LatestEmail = enriched,
-                            ResponseReminderEmailId = isNewResponse ? enriched.Id : tickets[matchingTicketIdx].ResponseReminderEmailId,
-                            ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : tickets[matchingTicketIdx].ResponseReminderSince
-                        };
+                        ResponseReminderEmailId = isNewResponse ? enriched.Id : evt.Snapshot.ResponseReminderEmailId,
+                        ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : evt.Snapshot.ResponseReminderSince
                     }
+                };
+                var matchingTicketIdx = tickets.FindIndex(t => string.Equals(t.Code, evt.TicketCode, StringComparison.OrdinalIgnoreCase));
+                if (matchingTicketIdx >= 0)
+                {
+                    tickets[matchingTicketIdx] = tickets[matchingTicketIdx] with
+                    {
+                        LatestEmail = enriched,
+                        ResponseReminderEmailId = isNewResponse ? enriched.Id : tickets[matchingTicketIdx].ResponseReminderEmailId,
+                        ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : tickets[matchingTicketIdx].ResponseReminderSince
+                    };
                 }
             }
+        }
+
+        await _stateLock.WaitAsync(cancellationToken);
+        try
+        {
             criticalEvents = criticalList;
             foreach (var group in criticalEvents.GroupBy(item => item.TicketCode,
                          StringComparer.OrdinalIgnoreCase))
@@ -815,6 +834,12 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     x.EventType == TicketEventType.EmailReceived &&
                     currentTracked.Status == TicketStatus.InProgress);
                 var keepResponseReminder = currentTracked.Status == TicketStatus.InProgress;
+                var unassignedReminderEvent = events.LastOrDefault(x =>
+                    string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase) &&
+                    x.EventType == TicketEventType.UnassignedReminder);
+                var responseReminderEvent = events.LastOrDefault(x =>
+                    string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase) &&
+                    x.EventType == TicketEventType.ResponseReminder);
                 var snapshot = currentTracked with
                 {
                     LatestEmail = eventEmail ??
@@ -825,6 +850,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     ResponseReminderSince = keepResponseReminder
                         ? responseEvent?.LatestEmail?.SentAt ?? responseEvent?.DetectedAt ??
                           currentTracked.ResponseReminderSince
+                        : null,
+                    UnassignedReminderBucket = unassignedReminderEvent?.Snapshot.UnassignedReminderBucket ?? currentTracked.UnassignedReminderBucket,
+                    ResponseReminderBucket = keepResponseReminder
+                        ? responseReminderEvent?.Snapshot.ResponseReminderBucket ?? currentTracked.ResponseReminderBucket
                         : null,
                     IsTerminal = currentTracked.Status.IsTerminal(settings.UnprocessedIsTerminal)
                 };

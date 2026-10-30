@@ -9,7 +9,7 @@ internal static class FtmsStatusMutationScript
 
           const nativeFetch = window.fetch;
           const NativeXMLHttpRequest = window.XMLHttpRequest;
-          const statusEndpointPattern = /^\/ihub\/(?:.+?\/)?(?:change[-_]?status|update[-_]?status|close[-_]?ticket|close|pending[-_]?customer|pause[-_]?ticket|pause|resume[-_]?ticket|resume|reopen|resolve)(?:v\d+)?\/?$/i;
+          const statusEndpointPattern = /^\/ihub\/(?:.+?\/)?(?:change[-_]?status|update[-_]?status|close[-_]?ticket|close|complete[-_]?ticket|complete|finish|pending[-_]?customer|pause[-_]?ticket|pause|resume[-_]?ticket|resume|reopen|resolve)(?:v\d+)?\/?$/i;
           const assignmentEndpointPattern = /^\/ihub\/(?:.+?\/)?(?:take[-_]?and[-_]?assignment|assign|assignment|take)(?:v\d+)?\/?$/i;
           const actionEndpointPattern = /^\/ihub\/(?:.+?\/)?(?:sendmail|sendemail|reply|replymail|save|update|edit|action|process|submit)(?:v\d+)?\/?$/i;
           const endpointType = value => {

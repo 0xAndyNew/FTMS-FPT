@@ -1461,6 +1461,59 @@ public sealed class NotificationFormatterEmailTests
         Assert.Contains(events, e => e.TicketCode == "RQ-CONCURRENT-2" && e.LatestEmail?.Body == email2.Body);
     }
 
+    [Fact]
+    public async Task ChangeDetector_DoesNotQueryEmail_WhenTicketHasNoEmailAndNotUpdated()
+    {
+        var sentAt = DateTimeOffset.UtcNow;
+        var oldSnapshot = Snapshot("RQ-NO-EMAIL", TicketStatus.Assigned, null, sentAt) with
+        {
+            AssigneeId = 42,
+            AssigneeName = "DuyPK21"
+        };
+        var currentSnapshot = oldSnapshot with { }; // Identical, not updated, no email
+        var calls = 0;
+        var client = new TestFtmsClient(() =>
+        {
+            calls++;
+            return null;
+        });
+
+        var events = await new TicketChangeDetector().DetectAsync(
+            new Dictionary<string, TicketSnapshot> { [oldSnapshot.Code] = oldSnapshot },
+            [currentSnapshot], client, new AppSettings(), CancellationToken.None);
+
+        Assert.Empty(events);
+        Assert.Equal(0, calls); // Must NOT query email when ticket has no email and UpdatedAt is unchanged
+    }
+
+    [Fact]
+    public async Task ChangeDetector_UnassignedReminder_DoesNotRequeryEmail_ForSameBucket()
+    {
+        var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+        var createdAt = now.AddMinutes(-7); // In bucket 1 (5-9 min)
+        var oldSnapshot = Snapshot("RQ-UNASSIGNED", TicketStatus.New, null, createdAt) with
+        {
+            AssigneeId = null,
+            AssigneeName = "---",
+            CreatedAt = createdAt,
+            UnassignedReminderBucket = 1 // Already reminded for 5-minute bucket
+        };
+        var currentSnapshot = oldSnapshot with { }; // Still in bucket 1
+        var calls = 0;
+        var client = new TestFtmsClient(() =>
+        {
+            calls++;
+            return null;
+        });
+
+        var events = await new TicketChangeDetector().DetectSupplementalAsync(
+            new Dictionary<string, TicketSnapshot> { [oldSnapshot.Code] = oldSnapshot },
+            [currentSnapshot], client, new AppSettings(), CancellationToken.None);
+
+        Assert.Empty(events);
+        Assert.Equal(0, calls); // Must NOT query email or re-emit reminder for the same bucket
+    }
+
     private sealed class ConcurrentTestFtmsClient(Func<string, LatestEmail?> getEmailByCode) : IFtmsClient
     {
         public Task<bool> IsAuthenticatedAsync(CancellationToken cancellationToken) => Task.FromResult(true);
