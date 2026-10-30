@@ -196,9 +196,16 @@ public partial class CompactWindow : Window
     private async void InitializeAsync(object sender, RoutedEventArgs e)
     {
         var root = _stateDirectory;
-        var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: Path.Combine(root, "WebView2"));
+        var options = new CoreWebView2EnvironmentOptions
+        {
+            AdditionalBrowserArguments = "--disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-features=CalculateNativeWinOcclusion"
+        };
+        var environment = await CoreWebView2Environment.CreateAsync(
+            userDataFolder: Path.Combine(root, "WebView2"),
+            options: options);
         await FtmsWebView.EnsureCoreWebView2Async(environment);
         await MonitorWebView.EnsureCoreWebView2Async(environment);
+        MonitorWebView.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
         BlockFtmsBot(FtmsWebView.CoreWebView2, environment);
         BlockFtmsBot(MonitorWebView.CoreWebView2, environment);
         FtmsWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
@@ -684,7 +691,7 @@ public partial class CompactWindow : Window
         {
             var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FTMS.Companion");
             var databasePath = Path.Combine(root, $"ftms-user-{accountId}.db");
-            var settings = new AppSettings { FtmsUrl = FtmsLegacyUrl, PollIntervalSeconds = 1, IdleDelaySeconds = 0, HistoryIntervalSeconds = 15 };
+            var settings = new AppSettings { FtmsUrl = FtmsLegacyUrl, PollIntervalSeconds = 1, IdleDelaySeconds = 0, HistoryIntervalSeconds = 60 };
             var telegram = new TelegramOutboxSender(databasePath,
                 () => (_settingsStore.Current.TelegramToken, _settingsStore.Current.TelegramChatId), _http,
                 getCurrentUserId: () => _activeAccountId);

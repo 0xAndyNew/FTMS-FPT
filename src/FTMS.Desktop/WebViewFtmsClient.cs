@@ -393,12 +393,12 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                 const fetchStatusHistory = async (historyStatus) => {
                   const list = [];
                   const seenPageKeys = new Set();
-                  for (let page = 1; page <= 2; page++) {
+                  for (let page = 1; page <= 1; page++) {
                     const historyParams = new URLSearchParams({
                       searchData: JSON.stringify({ search: '', source: '-1', departmentId: userDept, staffId: '-1',
                         serviceTypeGroup: '-1', serviceType: '-1', requestLevel: '-1', status: historyStatus }),
                       fromDate: vietnamDate(-1), toDate: vietnamDate(1), typeSearch: '0',
-                      take: '1000', skip: String((page - 1) * 1000), page: String(page), pageSize: '1000'
+                      take: '500', skip: '0', page: '1', pageSize: '500'
                     });
                     const historyResponse = await fetch('/ihub/list/GetListHistoryRequestByType?' + historyParams.toString(), {
                       credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' }
@@ -447,7 +447,7 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
                         slaDeviationMinutes: null, slaType: null
                       });
                     }
-                    if (historyRows.length < 1000) break;
+                    if (historyRows.length < 500) break;
                   }
                   return list;
                 };
@@ -472,30 +472,22 @@ public sealed class WebViewFtmsClient(WebView2 webView, string ftmsUrl) : IFtmsC
               let tickets = [];
               let closedTickets = [];
               try {
-                const tasks = [];
-                if ({{activeFlag}}) tasks.push(fetchActive());
-                if ({{historyFlag}}) tasks.push(fetchHistory());
-                const results = await Promise.allSettled(tasks);
-                let resultIdx = 0;
                 if ({{activeFlag}}) {
-                  const activeResult = results[resultIdx++];
-                  if (activeResult.status !== 'fulfilled') {
-                    const message = String(activeResult.reason?.message || activeResult.reason || '');
-                    return JSON.stringify({ error: message.includes('401') ? 'FTMS API HTTP 401' : (message || 'Lỗi đọc danh sách ticket FTMS') });
-                  }
-                  tickets = activeResult.value;
+                  tickets = await fetchActive();
                 }
                 if ({{historyFlag}}) {
-                  const historyResult = results[resultIdx++];
-                  if (historyResult.status === 'fulfilled') {
-                    closedTickets = historyResult.value;
-                  } else if (!{{activeFlag}}) {
-                    const message = String(historyResult.reason?.message || historyResult.reason || '');
-                    return JSON.stringify({ error: message.includes('401') ? 'FTMS history HTTP 401' : (message || 'Lỗi đọc lịch sử đóng ticket FTMS') });
+                  try {
+                    closedTickets = await fetchHistory();
+                  } catch (historyErr) {
+                    if (!{{activeFlag}}) {
+                      const message = String(historyErr?.message || historyErr || '');
+                      return JSON.stringify({ error: message.includes('401') ? 'FTMS history HTTP 401' : (message || 'Lỗi đọc lịch sử đóng ticket FTMS') });
+                    }
                   }
                 }
               } catch (error) {
-                return JSON.stringify({ error: String(error) });
+                const message = String(error?.message || error || '');
+                return JSON.stringify({ error: message.includes('401') ? 'FTMS API HTTP 401' : (message || 'Lỗi đọc danh sách ticket FTMS') });
               }
 
               if (!{{historyFlag}}) {

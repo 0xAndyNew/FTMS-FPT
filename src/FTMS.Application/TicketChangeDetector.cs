@@ -228,7 +228,7 @@ public sealed class TicketChangeDetector
             if (!snapshot.Status.IsTerminal(settings.UnprocessedIsTerminal) && !emailIncludedInEvent)
             {
                 var listHasNewEmail = IsNewEmail(old.LatestEmail, snapshot.LatestEmail);
-                if (listHasNewEmail || old.UpdatedAt != snapshot.UpdatedAt)
+                if (listHasNewEmail)
                 {
                     var email = await LatestEmailAsync();
                     if (IsNewEmail(old.LatestEmail, email) && email is not null)
