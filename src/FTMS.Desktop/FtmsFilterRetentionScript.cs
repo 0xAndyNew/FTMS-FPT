@@ -13,15 +13,19 @@ internal static class FtmsFilterRetentionScript
             .toLowerCase()
             .trim();
 
-          const listEndpointPattern = /\/ihub\/(?:request|cases|alarm)\/(?:getlistrequest|getlistcases|getlistalarm)/i;
+          const listEndpointPattern = /\/ihub\/request\/GetListRequest/i;
 
           let myTicketJustToggled = false;
           let toggleTimestamp = 0;
 
           const isMyTicketButton = el => {
             if (!el) return false;
+            // Ignore any elements in header or top navigation (avatar, alarm bell, search bar)
+            if (el.closest('header, nav, .main-header, .navbar, #header, .header')) return false;
+
             const btn = el.closest('button, [role="button"], a, .btn');
             if (!btn) return false;
+            if (btn.closest('header, nav, .main-header, .navbar, #header, .header, .dropdown-menu')) return false;
 
             const textProps = [
               btn.getAttribute('title'),
@@ -31,26 +35,16 @@ internal static class FtmsFilterRetentionScript
               btn.innerText
             ].map(norm).join(' ');
 
-            if (textProps.includes('cua toi') || textProps.includes('my ticket') || textProps.includes('ca nhan'))
+            if (textProps.includes('cua toi') || textProps.includes('my ticket'))
               return true;
 
+            // In the ticket filter toolbar, the "Của tôi" button is right next to the "Vùng miền" button
             const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a, .btn'));
             const vmBtn = allBtns.find(b => norm(b.innerText).includes('vung mien'));
             if (vmBtn && vmBtn.parentElement) {
               const siblings = Array.from(vmBtn.parentElement.querySelectorAll('button, [role="button"], a, .btn'));
               const vmIdx = siblings.indexOf(vmBtn);
               if (vmIdx !== -1 && siblings[vmIdx + 1] === btn) return true;
-            }
-
-            const icon = btn.querySelector('i, svg, [class*="user"], [class*="person"]');
-            if (icon) {
-              const cls = norm(icon.getAttribute('class') || '') + ' ' + norm(btn.getAttribute('class') || '');
-              if (cls.includes('user') || cls.includes('person') || cls.includes('avatar') || cls.includes('profile'))
-                return true;
-              if (icon.tagName && icon.tagName.toLowerCase() === 'svg' && icon.querySelector('circle') && icon.querySelector('path')) {
-                if (vmBtn && allBtns.indexOf(btn) > allBtns.indexOf(vmBtn) && allBtns.indexOf(btn) <= allBtns.indexOf(vmBtn) + 2)
-                  return true;
-              }
             }
 
             return false;
@@ -126,6 +120,7 @@ internal static class FtmsFilterRetentionScript
           const syncStatusDropdownUi = () => {
             const containers = document.querySelectorAll('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, div[class*="dropdown"], div[class*="popover"]');
             for (const container of containers) {
+              if (container.offsetParent === null && container.style.display === 'none') continue;
               const text = norm(container.innerText);
               if (text.includes('tat ca') && text.includes('moi') && text.includes('phan cong')) {
                 const items = Array.from(container.querySelectorAll('li, label, div, [role="option"], tr'));
@@ -180,7 +175,7 @@ internal static class FtmsFilterRetentionScript
             window.fetch = function(input, init) {
               try {
                 const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
-                if (listEndpointPattern.test(url)) {
+                if (!/alarm/i.test(url) && listEndpointPattern.test(url)) {
                   if (myTicketJustToggled || (Date.now() - toggleTimestamp < 6000)) {
                     if (init && init.body) {
                       init.body = modifyStatusInPayload(init.body);
@@ -208,14 +203,14 @@ internal static class FtmsFilterRetentionScript
 
             OrigXHR.prototype.send = function(body) {
               try {
-                if (this.__filterUrl && listEndpointPattern.test(this.__filterUrl)) {
+                if (this.__filterUrl && !/alarm/i.test(this.__filterUrl) && listEndpointPattern.test(this.__filterUrl)) {
                   if (myTicketJustToggled || (Date.now() - toggleTimestamp < 6000)) {
                     body = modifyStatusInPayload(body);
                     setTimeout(updateStatusButtonLabel, 300);
                   }
                 }
               } catch { }
-              return origSend.call(this, body);
+              return arguments.length ? origSend.call(this, body) : origSend.apply(this, arguments);
             };
           }
         })();
