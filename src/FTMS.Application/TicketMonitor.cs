@@ -706,7 +706,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             {
                 throw;
             }
-            catch
+            catch when (evt.EventType != TicketEventType.Created)
             {
                 return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: evt.LatestEmail ?? evt.Snapshot.LatestEmail);
             }

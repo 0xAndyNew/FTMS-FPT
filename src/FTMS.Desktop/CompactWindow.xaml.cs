@@ -270,6 +270,7 @@ public partial class CompactWindow : Window
         };
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStatusMutationScript.Value);
+        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsFilterRetentionScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync("""
             (() => {
                 window.open = function(url) {
