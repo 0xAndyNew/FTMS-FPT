@@ -139,7 +139,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
             EnterWaitingForUser("SSO/ADFS cần bạn hoàn tất đăng nhập hoặc MFA trong cửa sổ FTMS.");
     }
 
-    private static readonly Uri LoginUri = new("https://ftms.fpt.net/id/login");
+    private static readonly Uri LoginUri = new("https://ftms.fpt.net/ihub/adfs/LoginCAS?ReturnUrl=%2Fihub%2Freact%2Flist%3Freferrer%3Dmenu");
 
     private async Task NavigateToTargetAsync(CancellationToken cancellationToken)
     {
@@ -192,7 +192,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
     public static bool IsFtmsIhubUri(Uri uri) => IsFtmsHost(uri) &&
         uri.AbsolutePath.StartsWith("/ihub/", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsFtmsHost(Uri uri) =>
+    internal static bool IsFtmsHost(Uri uri) =>
         string.Equals(uri.Host, "ftms.fpt.net", StringComparison.OrdinalIgnoreCase);
 
     private const string LoginDocumentScript = """

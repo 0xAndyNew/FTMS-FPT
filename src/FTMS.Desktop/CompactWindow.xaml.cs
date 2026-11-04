@@ -42,6 +42,10 @@ public partial class CompactWindow : Window
     private bool _settingsOpen;
     private bool _visibleNavigationInProgress;
     private bool _manualLoginNotificationShown;
+    private readonly DispatcherTimer _visibleRetryTimer = new();
+    private readonly DispatcherTimer _monitorRetryTimer = new();
+    private int _visibleRetryAttempts;
+    private int _monitorRetryAttempts;
     private bool _checkingTelegram;
     private bool _wasLoggingIn;
     private Task _statusMutationSync = Task.CompletedTask;
@@ -59,12 +63,16 @@ public partial class CompactWindow : Window
             _lifetime.Cancel();
             _accountLifetime?.Cancel();
             _refreshTimer.Stop();
+            _visibleRetryTimer.Stop();
+            _monitorRetryTimer.Stop();
             _http.Dispose();
             _trayIcon?.Dispose();
         };
         Closing += OnWindowClosing;
         StateChanged += OnWindowStateChanged;
         _refreshTimer.Tick += (_, _) => RunAutoRefresh();
+        _visibleRetryTimer.Tick += (_, _) => RetryVisibleNavigation();
+        _monitorRetryTimer.Tick += (_, _) => RetryMonitorNavigation();
         InitializeTrayIcon();
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerModeChanged;
         System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
@@ -156,6 +164,13 @@ public partial class CompactWindow : Window
             await Task.Delay(3000, _lifetime.Token).ConfigureAwait(true);
             if (_lifetime.IsCancellationRequested) return;
 
+            if (!_isListPage && FtmsWebView.CoreWebView2 is not null)
+            {
+                _visibleRetryTimer.Stop();
+                _visibleRetryAttempts = 0;
+                RetryVisibleNavigation();
+            }
+
             var monitor = _monitor;
             var accountLifetime = _accountLifetime;
             if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
@@ -168,6 +183,8 @@ public partial class CompactWindow : Window
                 var uri = MonitorWebView.Source;
                 if (uri is null || !WebViewLoginRecovery.IsFtmsIhubUri(uri))
                 {
+                    _monitorRetryTimer.Stop();
+                    _monitorRetryAttempts = 0;
                     MonitorWebView.Source = new Uri(FtmsLegacyUrl);
                 }
             }
@@ -184,11 +201,24 @@ public partial class CompactWindow : Window
             await Task.Delay(2000, _lifetime.Token).ConfigureAwait(true);
             if (_lifetime.IsCancellationRequested) return;
 
+            if (!_isListPage && FtmsWebView.CoreWebView2 is not null)
+            {
+                _visibleRetryTimer.Stop();
+                _visibleRetryAttempts = 0;
+                RetryVisibleNavigation();
+            }
+
             var monitor = _monitor;
             var accountLifetime = _accountLifetime;
             if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
             {
                 _ = Task.Run(() => monitor.SyncNowAsync(forceHistory: true, accountLifetime.Token));
+            }
+            else if (MonitorWebView.CoreWebView2 is not null)
+            {
+                _monitorRetryTimer.Stop();
+                _monitorRetryAttempts = 0;
+                RetryMonitorNavigation();
             }
         });
     }
@@ -412,9 +442,13 @@ public partial class CompactWindow : Window
         if (_lifetime.IsCancellationRequested || _ftmsClient is null) return;
         if (!e.IsSuccess)
         {
-            MonitorText.Text = $"WebView giám sát không mở được FTMS: {e.WebErrorStatus}";
+            if (e.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled) return;
+            ScheduleMonitorNavigationRetry(e.WebErrorStatus);
             return;
         }
+
+        _monitorRetryTimer.Stop();
+        _monitorRetryAttempts = 0;
 
         var uri = MonitorWebView.Source;
         if (uri is null) return;
@@ -541,10 +575,14 @@ public partial class CompactWindow : Window
         if (_lifetime.IsCancellationRequested || _displayLoginRecovery is null) return;
         if (!e.IsSuccess)
         {
-            SessionText.Text = "L\u1ed7i k\u1ebft n\u1ed1i";
-            MonitorText.Text = $"Kh\u00f4ng th\u1ec3 m\u1edf FTMS: {e.WebErrorStatus}";
+            if (e.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled) return;
+            SetSessionStatus("L\u1ed7i k\u1ebft n\u1ed1i", "#D03B3B");
+            ScheduleVisibleNavigationRetry(e.WebErrorStatus);
             return;
         }
+
+        _visibleRetryTimer.Stop();
+        _visibleRetryAttempts = 0;
 
         try
         {
@@ -746,9 +784,75 @@ public partial class CompactWindow : Window
         }
         finally { _settingsOpen = false; MarkUserActivity(); }
     }
+    private void ScheduleVisibleNavigationRetry(CoreWebView2WebErrorStatus errorStatus)
+    {
+        _visibleRetryAttempts++;
+        var delaySeconds = _visibleRetryAttempts switch
+        {
+            1 => 3,
+            2 => 5,
+            3 => 8,
+            _ => 12
+        };
+
+        MonitorText.Text = $"Mất kết nối FTMS ({errorStatus}); tự động thử lại sau {delaySeconds} giây (lần {_visibleRetryAttempts})…";
+        _visibleRetryTimer.Stop();
+        _visibleRetryTimer.Interval = TimeSpan.FromSeconds(delaySeconds);
+        _visibleRetryTimer.Start();
+    }
+
+    private void RetryVisibleNavigation()
+    {
+        _visibleRetryTimer.Stop();
+        if (_lifetime.IsCancellationRequested || FtmsWebView.CoreWebView2 is null) return;
+        MonitorText.Text = $"Đang thử kết nối lại FTMS (lần {_visibleRetryAttempts})…";
+        SetSessionStatus("Đang kết nối lại", "#D9A441");
+        if (FtmsWebView.Source is null || !WebViewLoginRecovery.IsFtmsHost(FtmsWebView.Source))
+        {
+            FtmsWebView.Source = new Uri(FtmsReactUrl);
+        }
+        else
+        {
+            FtmsWebView.Reload();
+        }
+    }
+
+    private void ScheduleMonitorNavigationRetry(CoreWebView2WebErrorStatus errorStatus)
+    {
+        _monitorRetryAttempts++;
+        var delaySeconds = _monitorRetryAttempts switch
+        {
+            1 => 3,
+            2 => 5,
+            3 => 8,
+            _ => 12
+        };
+
+        MonitorText.Text = $"WebView giám sát gặp sự cố ({errorStatus}); đang thử lại sau {delaySeconds} giây…";
+        _monitorRetryTimer.Stop();
+        _monitorRetryTimer.Interval = TimeSpan.FromSeconds(delaySeconds);
+        _monitorRetryTimer.Start();
+    }
+
+    private void RetryMonitorNavigation()
+    {
+        _monitorRetryTimer.Stop();
+        if (_lifetime.IsCancellationRequested || MonitorWebView.CoreWebView2 is null) return;
+        if (MonitorWebView.Source is null || !WebViewLoginRecovery.IsFtmsHost(MonitorWebView.Source))
+        {
+            MonitorWebView.Source = new Uri(FtmsLegacyUrl);
+        }
+        else
+        {
+            MonitorWebView.Reload();
+        }
+    }
+
     private void OpenFtms(object sender, RoutedEventArgs e)
     {
         MarkUserActivity();
+        _visibleRetryTimer.Stop();
+        _visibleRetryAttempts = 0;
         if (FtmsWebView.CoreWebView2 is null) return;
         var uri = FtmsWebView.Source;
         if (uri is not null && string.Equals(uri.GetLeftPart(UriPartial.Path).TrimEnd('/'),
@@ -767,6 +871,8 @@ public partial class CompactWindow : Window
     private void ReloadFtms(object sender, RoutedEventArgs e)
     {
         MarkUserActivity();
+        _visibleRetryTimer.Stop();
+        _visibleRetryAttempts = 0;
         var monitor = _monitor;
         var accountLifetime = _accountLifetime;
         if (monitor is not null && accountLifetime is not null && !accountLifetime.IsCancellationRequested)
@@ -774,7 +880,23 @@ public partial class CompactWindow : Window
 
         if (FtmsWebView.CoreWebView2 is null) return;
         MonitorText.Text = $"Tải lại trang hiện tại lúc {DateTime.Now:HH:mm:ss}";
-        FtmsWebView.Reload();
+        if (FtmsWebView.Source is null || !WebViewLoginRecovery.IsFtmsHost(FtmsWebView.Source))
+        {
+            FtmsWebView.Source = new Uri(FtmsReactUrl);
+        }
+        else
+        {
+            FtmsWebView.Reload();
+        }
+    }
+    private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        MarkUserActivity();
+        if (e.Key == Key.F5)
+        {
+            e.Handled = true;
+            ReloadFtms(sender, e);
+        }
     }
     private void OnUserActivity(object sender, InputEventArgs e) => MarkUserActivity();
     private void MarkUserActivity() => _lastUserActivity = DateTimeOffset.UtcNow;
