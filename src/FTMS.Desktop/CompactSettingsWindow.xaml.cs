@@ -31,7 +31,8 @@ public partial class CompactSettingsWindow : Window
             ShowTestStatus("HTTP proxy phải có dạng http://host:port (không chứa tài khoản hoặc đường dẫn).", false);
             return;
         }
-        var seconds = int.TryParse(RefreshSecondsBox.Text, out var value) ? Math.Clamp(value, 5, 3600) : 30;
+        var text = new string((RefreshSecondsBox.Text ?? "").Where(char.IsDigit).ToArray());
+        var seconds = int.TryParse(text, out var value) ? Math.Clamp(value, 1, 3600) : 30;
         _store.Save(new DesktopSettings(TokenBox.Password.Trim(), ChatIdBox.Text.Trim(), StartupCheck.IsChecked == true,
             AutoRefreshCheck.IsChecked == true, seconds, proxyUrl));
         DialogResult = true;

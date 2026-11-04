@@ -809,7 +809,7 @@ public partial class CompactWindow : Window
     private void ApplyRefreshSettings()
     {
         _refreshTimer.Stop(); if (!_settingsStore.Current.AutoRefreshEnabled) return;
-        _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settingsStore.Current.AutoRefreshSeconds, 5, 3600)); _refreshTimer.Start();
+        _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settingsStore.Current.AutoRefreshSeconds, 1, 3600)); _refreshTimer.Start();
     }
 
     private async void RunAutoRefresh()
