@@ -13,25 +13,18 @@ internal static class FtmsFilterRetentionScript
             .toLowerCase()
             .trim();
 
-          const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases)/i;
+          const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases|getlist)/i;
 
-          let myTicketJustToggled = false;
-          let toggleTimestamp = 0;
+          let manualOverride = false;
+          try {
+            manualOverride = sessionStorage.getItem('ftms_companion_manual_override') === 'true';
+          } catch { }
 
-          // Safe deferred restoration from sessionStorage after initial page mount (avoids startup alarm collision)
-          setTimeout(() => {
-            try {
-              if (sessionStorage.getItem('ftms_companion_retain_status') === 'true') {
-                myTicketJustToggled = true;
-                toggleTimestamp = Date.now();
-                updateStatusButtonLabel();
-              }
-            } catch { }
-          }, 2500);
+          const shouldRetainStatus = () => !manualOverride;
 
           const isAlarmRequest = (url, body) => {
             const u = String(url || '');
-            if (/\/alarm\//i.test(u) || /countalarm|getlistalarm/i.test(u)) return true;
+            if (/(?:\/alarm(?:\/|$|\?)|countalarm|getlistalarm)/i.test(u)) return true;
             if (/[?&]alarmType=(?!0\b)[^&]*/i.test(u)) return true;
             if (/[?&]isAlarm=true/i.test(u)) return true;
 
@@ -43,6 +36,7 @@ internal static class FtmsFilterRetentionScript
                     const at = j.alarmType ?? j.input?.alarmType;
                     if (at !== undefined && String(at) !== '0') return true;
                     if (j.isAlarm === true || j.input?.isAlarm === true) return true;
+                    if (j.type === 'alarm' || j.input?.type === 'alarm') return true;
                   } else {
                     if (/(?:^|[&])alarmType=(?!0\b)[^&]*/i.test(body)) return true;
                     if (/(?:^|[&])isAlarm=true/i.test(body)) return true;
@@ -201,16 +195,34 @@ internal static class FtmsFilterRetentionScript
                 const items = Array.from(container.querySelectorAll('li, label, div, [role="option"], tr'));
                 for (const item of items) {
                   const itemText = norm(item.innerText);
-                  const checkbox = item.querySelector('input[type="checkbox"], [role="checkbox"]');
+                  const checkbox = item.querySelector('input[type="checkbox"], [role="checkbox"]') ||
+                                    (item.getAttribute('role') === 'checkbox' ? item : null);
                   if (!checkbox) continue;
-                  const isChecked = checkbox.checked || checkbox.getAttribute('aria-checked') === 'true' ||
-                                    checkbox.classList.contains('checked') || checkbox.classList.contains('ant-checkbox-checked');
-                  if (itemText === 'tat ca' && isChecked) {
-                    checkbox.click();
-                  } else if ((itemText === 'moi' || itemText === 'phan cong') && !isChecked) {
-                    checkbox.click();
-                  } else if ((itemText.includes('dang thuc hien') || itemText.includes('hoan thanh') || itemText.includes('tam ngung')) && isChecked) {
-                    checkbox.click();
+                  const isChecked = checkbox.checked === true ||
+                                    checkbox.getAttribute('aria-checked') === 'true' ||
+                                    checkbox.classList.contains('checked') ||
+                                    checkbox.classList.contains('ant-checkbox-checked') ||
+                                    item.classList.contains('active') ||
+                                    item.classList.contains('selected') ||
+                                    item.classList.contains('ant-select-item-option-selected');
+
+                  const isTatCa = itemText.startsWith('tat ca');
+                  const isMoi = itemText.startsWith('moi') || (itemText.includes('moi') && !itemText.includes('lam moi'));
+                  const isPhanCong = itemText.startsWith('phan cong') || itemText.includes('phan cong');
+                  const isOther = itemText.includes('dang thuc hien') || itemText.includes('hoan thanh') ||
+                                  itemText.includes('tam ngung') || itemText.includes('dong') || itemText.includes('huy');
+
+                  const triggerToggle = el => {
+                    el.click();
+                    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch { }
+                  };
+
+                  if (isTatCa && isChecked) {
+                    triggerToggle(checkbox);
+                  } else if ((isMoi || isPhanCong) && !isChecked) {
+                    triggerToggle(checkbox);
+                  } else if (isOther && isChecked) {
+                    triggerToggle(checkbox);
                   }
                 }
               }
@@ -218,12 +230,18 @@ internal static class FtmsFilterRetentionScript
             updateStatusButtonLabel();
           };
 
+          if (shouldRetainStatus()) {
+            setTimeout(updateStatusButtonLabel, 300);
+            setTimeout(updateStatusButtonLabel, 800);
+            setTimeout(updateStatusButtonLabel, 1500);
+            setTimeout(updateStatusButtonLabel, 3000);
+          }
+
           // Capture click events
           document.addEventListener('click', e => {
             if (isMyTicketButton(e.target)) {
-              myTicketJustToggled = true;
-              toggleTimestamp = Date.now();
-              try { sessionStorage.setItem('ftms_companion_retain_status', 'true'); } catch { }
+              manualOverride = false;
+              try { sessionStorage.removeItem('ftms_companion_manual_override'); } catch { }
               setTimeout(updateStatusButtonLabel, 100);
               setTimeout(updateStatusButtonLabel, 300);
               setTimeout(updateStatusButtonLabel, 600);
@@ -233,7 +251,7 @@ internal static class FtmsFilterRetentionScript
             }
 
             if (isStatusToggleButton(e.target)) {
-              if (myTicketJustToggled || (Date.now() - toggleTimestamp < 30000)) {
+              if (shouldRetainStatus()) {
                 setTimeout(syncStatusDropdownUi, 50);
                 setTimeout(syncStatusDropdownUi, 150);
                 setTimeout(syncStatusDropdownUi, 300);
@@ -243,9 +261,8 @@ internal static class FtmsFilterRetentionScript
 
             if (e.isTrusted && isStatusDropdownElement(e.target)) {
               // User is manually interacting with status dropdown items
-              myTicketJustToggled = false;
-              toggleTimestamp = 0;
-              try { sessionStorage.removeItem('ftms_companion_retain_status'); } catch { }
+              manualOverride = true;
+              try { sessionStorage.setItem('ftms_companion_manual_override', 'true'); } catch { }
             }
           }, true);
 
@@ -257,7 +274,7 @@ internal static class FtmsFilterRetentionScript
                 let url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
                 const body = init?.body;
                 if (listEndpointPattern.test(url) && !isAlarmRequest(url, body)) {
-                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) {
+                  if (shouldRetainStatus()) {
                     if (init && init.body) {
                       init.body = modifyStatusInPayload(init.body);
                     }
@@ -285,7 +302,7 @@ internal static class FtmsFilterRetentionScript
               try {
                 this.__filterUrl = String(url || '');
                 if (listEndpointPattern.test(this.__filterUrl) && !isAlarmRequest(this.__filterUrl, null)) {
-                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) {
+                  if (shouldRetainStatus()) {
                     const newUrl = modifyUrl(url);
                     if (newUrl !== url) {
                       url = newUrl;
@@ -300,7 +317,7 @@ internal static class FtmsFilterRetentionScript
             OrigXHR.prototype.send = function(body) {
               try {
                 if (this.__filterUrl && listEndpointPattern.test(this.__filterUrl) && !isAlarmRequest(this.__filterUrl, body)) {
-                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) {
+                  if (shouldRetainStatus()) {
                     body = modifyStatusInPayload(body);
                     setTimeout(updateStatusButtonLabel, 200);
                     setTimeout(updateStatusButtonLabel, 600);
