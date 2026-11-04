@@ -13,10 +13,13 @@ internal static class FtmsFilterRetentionScript
             .toLowerCase()
             .trim();
 
-          const listEndpointPattern = /\/ihub\/request\/GetListRequest/i;
+          const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases)/i;
 
           let myTicketJustToggled = false;
-          let toggleTimestamp = 0;
+          try {
+            myTicketJustToggled = sessionStorage.getItem('ftms_companion_retain_status') === 'true';
+          } catch { }
+          let toggleTimestamp = myTicketJustToggled ? Date.now() : 0;
 
           const isMyTicketButton = el => {
             if (!el) return false;
@@ -35,16 +38,36 @@ internal static class FtmsFilterRetentionScript
               btn.innerText
             ].map(norm).join(' ');
 
-            if (textProps.includes('cua toi') || textProps.includes('my ticket'))
+            if (textProps.includes('cua toi') || textProps.includes('my ticket') || textProps.includes('ca nhan'))
               return true;
 
             // In the ticket filter toolbar, the "Của tôi" button is right next to the "Vùng miền" button
             const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a, .btn'));
             const vmBtn = allBtns.find(b => norm(b.innerText).includes('vung mien'));
-            if (vmBtn && vmBtn.parentElement) {
-              const siblings = Array.from(vmBtn.parentElement.querySelectorAll('button, [role="button"], a, .btn'));
-              const vmIdx = siblings.indexOf(vmBtn);
-              if (vmIdx !== -1 && siblings[vmIdx + 1] === btn) return true;
+            if (vmBtn) {
+              const vmIdx = allBtns.indexOf(vmBtn);
+              const btnIdx = allBtns.indexOf(btn);
+              if (btnIdx > vmIdx && btnIdx <= vmIdx + 2) {
+                const text = norm(btn.innerText);
+                if (!text.includes('vung mien') && !text.includes('trang thai') && !text.includes('tim kiem'))
+                  return true;
+              }
+              if (vmBtn.parentElement) {
+                const siblings = Array.from(vmBtn.parentElement.querySelectorAll('button, [role="button"], a, .btn'));
+                const vmSiblingIdx = siblings.indexOf(vmBtn);
+                if (vmSiblingIdx !== -1 && siblings[vmSiblingIdx + 1] === btn) return true;
+              }
+            }
+
+            const icon = btn.querySelector('i, svg, [class*="user"], [class*="person"]');
+            if (icon) {
+              const cls = norm(icon.getAttribute('class') || '') + ' ' + norm(btn.getAttribute('class') || '');
+              if (cls.includes('user') || cls.includes('person') || cls.includes('avatar') || cls.includes('profile'))
+                return true;
+              if (icon.tagName && icon.tagName.toLowerCase() === 'svg' && icon.querySelector('circle') && icon.querySelector('path')) {
+                if (vmBtn && allBtns.indexOf(btn) > allBtns.indexOf(vmBtn) && allBtns.indexOf(btn) <= allBtns.indexOf(vmBtn) + 2)
+                  return true;
+              }
             }
 
             return false;
@@ -94,6 +117,15 @@ internal static class FtmsFilterRetentionScript
             return body;
           };
 
+          const modifyUrl = url => {
+            if (!url || typeof url !== 'string') return url;
+            if (!listEndpointPattern.test(url) || /alarm/i.test(url)) return url;
+            if (url.includes('strStatus=')) {
+              return url.replace(/(^|[?&])strStatus=[^&]*/, '$1strStatus=0%2C1');
+            }
+            return url;
+          };
+
           const updateStatusButtonLabel = () => {
             const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a, .btn'));
             const statusBtn = allBtns.find(b => {
@@ -120,7 +152,6 @@ internal static class FtmsFilterRetentionScript
           const syncStatusDropdownUi = () => {
             const containers = document.querySelectorAll('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, div[class*="dropdown"], div[class*="popover"]');
             for (const container of containers) {
-              if (container.offsetParent === null && container.style.display === 'none') continue;
               const text = norm(container.innerText);
               if (text.includes('tat ca') && text.includes('moi') && text.includes('phan cong')) {
                 const items = Array.from(container.querySelectorAll('li, label, div, [role="option"], tr'));
@@ -143,14 +174,23 @@ internal static class FtmsFilterRetentionScript
             updateStatusButtonLabel();
           };
 
+          // If previously retained via sessionStorage, apply UI sync
+          if (myTicketJustToggled) {
+            setTimeout(updateStatusButtonLabel, 500);
+            setTimeout(updateStatusButtonLabel, 1500);
+            setTimeout(updateStatusButtonLabel, 3000);
+          }
+
           // Capture click events
           document.addEventListener('click', e => {
             if (isMyTicketButton(e.target)) {
               myTicketJustToggled = true;
               toggleTimestamp = Date.now();
+              try { sessionStorage.setItem('ftms_companion_retain_status', 'true'); } catch { }
               setTimeout(updateStatusButtonLabel, 200);
               setTimeout(updateStatusButtonLabel, 600);
               setTimeout(updateStatusButtonLabel, 1200);
+              setTimeout(updateStatusButtonLabel, 2500);
               return;
             }
 
@@ -162,10 +202,11 @@ internal static class FtmsFilterRetentionScript
               return;
             }
 
-            if (isStatusDropdownElement(e.target)) {
+            if (e.isTrusted && isStatusDropdownElement(e.target)) {
               // User is manually interacting with status dropdown items
               myTicketJustToggled = false;
               toggleTimestamp = 0;
+              try { sessionStorage.removeItem('ftms_companion_retain_status'); } catch { }
             }
           }, true);
 
@@ -174,11 +215,16 @@ internal static class FtmsFilterRetentionScript
           if (typeof origFetch === 'function') {
             window.fetch = function(input, init) {
               try {
-                const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
+                let url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
                 if (!/alarm/i.test(url) && listEndpointPattern.test(url)) {
                   if (myTicketJustToggled || (Date.now() - toggleTimestamp < 6000)) {
                     if (init && init.body) {
                       init.body = modifyStatusInPayload(init.body);
+                    }
+                    if (url.includes('strStatus=')) {
+                      const newUrl = modifyUrl(url);
+                      if (typeof input === 'string') input = newUrl;
+                      else if (input instanceof URL) input = new URL(newUrl);
                     }
                     setTimeout(updateStatusButtonLabel, 300);
                   }
@@ -196,6 +242,9 @@ internal static class FtmsFilterRetentionScript
 
             OrigXHR.prototype.open = function(method, url) {
               try {
+                if (myTicketJustToggled || (Date.now() - toggleTimestamp < 6000)) {
+                  url = modifyUrl(url);
+                }
                 this.__filterUrl = String(url || '');
               } catch { }
               return origOpen.apply(this, arguments);
