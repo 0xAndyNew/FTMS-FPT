@@ -139,12 +139,14 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
             EnterWaitingForUser("SSO/ADFS cần bạn hoàn tất đăng nhập hoặc MFA trong cửa sổ FTMS.");
     }
 
+    private static readonly Uri LoginUri = new("https://ftms.fpt.net/id/login");
+
     private async Task NavigateToTargetAsync(CancellationToken cancellationToken)
     {
         if (DateTimeOffset.UtcNow < _nextNavigationAllowedAt) return;
         _nextNavigationAllowedAt = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(12);
         Publish(LoginRecoveryState.Navigating, "Phiên FTMS đã hết hạn, đang mở lại trang đăng nhập");
-        await webView.Dispatcher.InvokeAsync(() => webView.Source = targetUri).Task.WaitAsync(cancellationToken);
+        await webView.Dispatcher.InvokeAsync(() => webView.Source = LoginUri).Task.WaitAsync(cancellationToken);
     }
 
     private void EnterWaitingForUser(string message)
