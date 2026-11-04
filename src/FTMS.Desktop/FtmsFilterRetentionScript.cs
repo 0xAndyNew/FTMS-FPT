@@ -13,18 +13,26 @@ internal static class FtmsFilterRetentionScript
             .toLowerCase()
             .trim();
 
-          const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases)/i;
+          const listEndpointPattern = /\/ihub\/(?:request|cases|alarm)\/(?:getlistrequest|getlistcases|getlistalarm)/i;
+
+          let myTicketJustToggled = false;
+          let toggleTimestamp = 0;
 
           let manualOverride = false;
           try {
             manualOverride = sessionStorage.getItem('ftms_companion_manual_override') === 'true';
           } catch { }
 
-          const shouldRetainStatus = () => !manualOverride;
+          let retained = false;
+          try {
+            retained = sessionStorage.getItem('ftms_companion_retained') === 'true';
+          } catch { }
+
+          const shouldRetainStatus = () => !manualOverride && (retained || myTicketJustToggled || (Date.now() - toggleTimestamp < 6000));
 
           const isAlarmRequest = (url, body) => {
             const u = String(url || '');
-            if (/(?:\/alarm(?:\/|$|\?)|countalarm|getlistalarm)/i.test(u)) return true;
+            if (/(?:\/alarm(?:\/|$|\?)|countalarm|getlistalarm|chart)/i.test(u)) return true;
             if (/[?&]alarmType=(?!0\b)[^&]*/i.test(u)) return true;
             if (/[?&]isAlarm=true/i.test(u)) return true;
 
@@ -33,10 +41,9 @@ internal static class FtmsFilterRetentionScript
                 if (typeof body === 'string') {
                   if (body.trim().startsWith('{')) {
                     const j = JSON.parse(body);
-                    const at = j.alarmType ?? j.input?.alarmType;
+                    const at = j.alarmType ?? j.input?.alarmType ?? j.filter?.alarmType;
                     if (at !== undefined && String(at) !== '0') return true;
-                    if (j.isAlarm === true || j.input?.isAlarm === true) return true;
-                    if (j.type === 'alarm' || j.input?.type === 'alarm') return true;
+                    if (j.isAlarm === true || j.input?.isAlarm === true || j.type === 'alarm' || j.input?.type === 'alarm') return true;
                   } else {
                     if (/(?:^|[&])alarmType=(?!0\b)[^&]*/i.test(body)) return true;
                     if (/(?:^|[&])isAlarm=true/i.test(body)) return true;
@@ -88,9 +95,10 @@ internal static class FtmsFilterRetentionScript
               }
             }
 
-            const icon = btn.querySelector('i, svg, [class*="user"], [class*="person"]');
+            const icon = btn.querySelector('i, svg, [class*="user"], [class*="person"], [class*="avatar"]');
             if (icon) {
-              const cls = norm(icon.getAttribute('class') || '') + ' ' + norm(btn.getAttribute('class') || '');
+              const iconBox = icon.closest('[class*="user"], [class*="person"], [class*="avatar"]') || icon;
+              const cls = norm(iconBox.getAttribute('class') || '') + ' ' + norm(btn.getAttribute('class') || '');
               if (cls.includes('user') || cls.includes('person') || cls.includes('avatar') || cls.includes('profile'))
                 return true;
               if (icon.tagName && icon.tagName.toLowerCase() === 'svg') {
@@ -119,27 +127,35 @@ internal static class FtmsFilterRetentionScript
           };
 
           const modifyStatusInPayload = body => {
-            if (!body) return 'strStatus=0%2C1';
+            if (!body) return body;
             try {
               if (typeof body === 'string') {
                 if (body.trim().startsWith('{')) {
                   const json = JSON.parse(body);
-                  json.strStatus = '0,1';
-                  if (json.input && typeof json.input === 'object') {
-                    json.input.strStatus = '0,1';
+                  if ('strStatus' in json || 'isMyTicket' in json) {
+                    json.strStatus = '0,1';
+                    if (json.input && typeof json.input === 'object') {
+                      json.input.strStatus = '0,1';
+                    }
+                    return JSON.stringify(json);
                   }
-                  return JSON.stringify(json);
-                } else if (/(?:^|[&])strStatus=[^&]*/.test(body)) {
-                  return body.replace(/(^|&)strStatus=[^&]*/, '$1strStatus=0%2C1');
-                } else {
-                  return body + (body.length > 0 ? '&' : '') + 'strStatus=0%2C1';
+                } else if (body.includes('strStatus=') || body.includes('isMyTicket=')) {
+                  if (body.includes('strStatus=')) {
+                    return body.replace(/(^|&)strStatus=[^&]*/, '$1strStatus=0%2C1');
+                  } else {
+                    return body + (body.length > 0 ? '&' : '') + 'strStatus=0%2C1';
+                  }
                 }
               } else if (body instanceof URLSearchParams) {
-                body.set('strStatus', '0,1');
-                return body;
+                if (body.has('strStatus') || body.has('isMyTicket')) {
+                  body.set('strStatus', '0,1');
+                  return body;
+                }
               } else if (typeof FormData !== 'undefined' && body instanceof FormData) {
-                body.set('strStatus', '0,1');
-                return body;
+                if (body.has('strStatus') || body.has('isMyTicket')) {
+                  body.set('strStatus', '0,1');
+                  return body;
+                }
               }
             } catch { }
             return body;
@@ -221,19 +237,23 @@ internal static class FtmsFilterRetentionScript
             setTimeout(updateStatusButtonLabel, 300);
             setTimeout(updateStatusButtonLabel, 800);
             setTimeout(updateStatusButtonLabel, 1500);
-            setTimeout(updateStatusButtonLabel, 3000);
           }
 
           // Capture click events
           document.addEventListener('click', e => {
             if (isMyTicketButton(e.target)) {
               manualOverride = false;
-              try { sessionStorage.removeItem('ftms_companion_manual_override'); } catch { }
+              retained = true;
+              myTicketJustToggled = true;
+              toggleTimestamp = Date.now();
+              try {
+                sessionStorage.removeItem('ftms_companion_manual_override');
+                sessionStorage.setItem('ftms_companion_retained', 'true');
+              } catch { }
               setTimeout(updateStatusButtonLabel, 100);
               setTimeout(updateStatusButtonLabel, 300);
               setTimeout(updateStatusButtonLabel, 600);
               setTimeout(updateStatusButtonLabel, 1200);
-              setTimeout(updateStatusButtonLabel, 2500);
               return;
             }
 
@@ -249,7 +269,13 @@ internal static class FtmsFilterRetentionScript
             if (e.isTrusted && isStatusDropdownElement(e.target)) {
               // User is manually interacting with status dropdown items
               manualOverride = true;
-              try { sessionStorage.setItem('ftms_companion_manual_override', 'true'); } catch { }
+              retained = false;
+              myTicketJustToggled = false;
+              toggleTimestamp = 0;
+              try {
+                sessionStorage.setItem('ftms_companion_manual_override', 'true');
+                sessionStorage.removeItem('ftms_companion_retained');
+              } catch { }
             }
           }, true);
 
