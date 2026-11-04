@@ -208,6 +208,18 @@ public partial class CompactWindow : Window
         MonitorWebView.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
         BlockFtmsBot(FtmsWebView.CoreWebView2, environment);
         BlockFtmsBot(MonitorWebView.CoreWebView2, environment);
+        FtmsWebView.CoreWebView2.NewWindowRequested += (_, args) =>
+        {
+            args.Handled = true;
+            if (!string.IsNullOrWhiteSpace(args.Uri) && args.Uri != "about:blank")
+            {
+                FtmsWebView.CoreWebView2.Navigate(args.Uri);
+            }
+        };
+        MonitorWebView.CoreWebView2.NewWindowRequested += (_, args) =>
+        {
+            args.Handled = true;
+        };
         FtmsWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         FtmsWebView.CoreWebView2.AddWebResourceRequestedFilter("https://ftms.fpt.net/*", CoreWebView2WebResourceContext.All);
         FtmsWebView.CoreWebView2.WebResourceResponseReceived += OnVisibleFtmsResponseReceived;
@@ -258,6 +270,16 @@ public partial class CompactWindow : Window
         };
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStatusMutationScript.Value);
+        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync("""
+            (() => {
+                window.open = function(url) {
+                    if (url && typeof url === 'string' && url !== 'about:blank') {
+                        location.href = url;
+                    }
+                    return window;
+                };
+            })();
+            """);
         _displayLoginRecovery = new WebViewLoginRecovery(FtmsWebView, new Uri(FtmsReactUrl));
         _displayLoginRecovery.StatusChanged += OnLoginRecoveryStatusChanged;
         _ftmsClient = new WebViewFtmsClient(MonitorWebView, FtmsLegacyUrl);

@@ -338,6 +338,12 @@ public sealed class TelegramOutboxSender(
                 return messageId;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (TelegramRequestException ex) when (ex.Message.Contains("message is not modified", StringComparison.OrdinalIgnoreCase) ||
+                                                    ex.Message.Contains("message to edit not found", StringComparison.OrdinalIgnoreCase) ||
+                                                    ex.Message.Contains("chat not found", StringComparison.OrdinalIgnoreCase))
+            {
+                return messageId;
+            }
             catch { return 0L; }
         });
 

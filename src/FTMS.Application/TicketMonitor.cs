@@ -564,7 +564,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     tickets.Add(closedSnapshot);
                 }
             }
-            else if (_missingMonitoredAttempts.TryGetValue(activeCode, out var attempts) && attempts >= 2)
+            else if (_missingMonitoredAttempts.TryGetValue(activeCode, out var attempts) &&
+                     _active.TryGetValue(activeCode, out var existingTracked) &&
+                     existingTracked.Status != TicketStatus.Completed &&
+                     (attempts == 2 || (attempts > 2 && attempts % 15 == 0)))
             {
                 try
                 {
@@ -586,6 +589,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                         };
                         tickets.Add(fallbackClosed);
                         if (isTerminal) _closedCache[activeCode] = fallbackClosed;
+                        if (resolvedStatus == TicketStatus.Completed)
+                        {
+                            _missingMonitoredAttempts[activeCode] = 0;
+                        }
                     }
                     // Nếu history trả null/không có OccurredAt → KHÔNG tạo synthetic Closed
                     // Ticket sẽ được giữ lại trong _active cho đến khi có xác nhận đóng thật
@@ -699,7 +706,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             {
                 throw;
             }
-            catch when (evt.EventType != TicketEventType.Created)
+            catch
             {
                 return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: evt.LatestEmail ?? evt.Snapshot.LatestEmail);
             }
