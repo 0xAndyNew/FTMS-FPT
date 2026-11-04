@@ -16,17 +16,54 @@ internal static class FtmsFilterRetentionScript
           const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases)/i;
 
           let myTicketJustToggled = false;
-          try {
-            myTicketJustToggled = sessionStorage.getItem('ftms_companion_retain_status') === 'true';
-          } catch { }
-          let toggleTimestamp = myTicketJustToggled ? Date.now() : 0;
+          let toggleTimestamp = 0;
+
+          // Safe deferred restoration from sessionStorage after initial page mount (avoids startup alarm collision)
+          setTimeout(() => {
+            try {
+              if (sessionStorage.getItem('ftms_companion_retain_status') === 'true') {
+                myTicketJustToggled = true;
+                toggleTimestamp = Date.now();
+                updateStatusButtonLabel();
+              }
+            } catch { }
+          }, 2500);
+
+          const isAlarmRequest = (url, body) => {
+            const u = String(url || '');
+            if (/\/alarm\//i.test(u) || /countalarm|getlistalarm/i.test(u)) return true;
+            if (/[?&]alarmType=(?!0\b)[^&]*/i.test(u)) return true;
+            if (/[?&]isAlarm=true/i.test(u)) return true;
+
+            if (body) {
+              try {
+                if (typeof body === 'string') {
+                  if (body.trim().startsWith('{')) {
+                    const j = JSON.parse(body);
+                    const at = j.alarmType ?? j.input?.alarmType;
+                    if (at !== undefined && String(at) !== '0') return true;
+                    if (j.isAlarm === true || j.input?.isAlarm === true) return true;
+                  } else {
+                    if (/(?:^|[&])alarmType=(?!0\b)[^&]*/i.test(body)) return true;
+                    if (/(?:^|[&])isAlarm=true/i.test(body)) return true;
+                  }
+                } else if (body instanceof URLSearchParams || (typeof FormData !== 'undefined' && body instanceof FormData)) {
+                  const at = body.get('alarmType');
+                  if (at !== null && String(at) !== '0') return true;
+                  const ia = body.get('isAlarm');
+                  if (ia === 'true') return true;
+                }
+              } catch { }
+            }
+            return false;
+          };
 
           const isMyTicketButton = el => {
             if (!el) return false;
             // Ignore any elements in header or top navigation (avatar, alarm bell, search bar)
             if (el.closest('header, nav, .main-header, .navbar, #header, .header')) return false;
 
-            const btn = el.closest('button, [role="button"], a, .btn');
+            const btn = el.closest('button, [role="button"], a, .btn, .ant-switch, [role="switch"], label');
             if (!btn) return false;
             if (btn.closest('header, nav, .main-header, .navbar, #header, .header, .dropdown-menu')) return false;
 
@@ -90,21 +127,20 @@ internal static class FtmsFilterRetentionScript
           };
 
           const modifyStatusInPayload = body => {
-            if (!body) return body;
+            if (!body) return 'strStatus=0%2C1';
             try {
               if (typeof body === 'string') {
                 if (body.trim().startsWith('{')) {
                   const json = JSON.parse(body);
-                  if ('strStatus' in json || 'isMyTicket' in json) {
-                    json.strStatus = '0,1';
-                    return JSON.stringify(json);
+                  json.strStatus = '0,1';
+                  if (json.input && typeof json.input === 'object') {
+                    json.input.strStatus = '0,1';
                   }
-                } else if (body.includes('strStatus=') || body.includes('isMyTicket=')) {
-                  if (body.includes('strStatus=')) {
-                    return body.replace(/(^|&)strStatus=[^&]*/, '$1strStatus=0%2C1');
-                  } else {
-                    return body + (body.length > 0 ? '&' : '') + 'strStatus=0%2C1';
-                  }
+                  return JSON.stringify(json);
+                } else if (/(?:^|[&])strStatus=[^&]*/.test(body)) {
+                  return body.replace(/(^|&)strStatus=[^&]*/, '$1strStatus=0%2C1');
+                } else {
+                  return body + (body.length > 0 ? '&' : '') + 'strStatus=0%2C1';
                 }
               } else if (body instanceof URLSearchParams) {
                 body.set('strStatus', '0,1');
@@ -119,11 +155,13 @@ internal static class FtmsFilterRetentionScript
 
           const modifyUrl = url => {
             if (!url || typeof url !== 'string') return url;
-            if (!listEndpointPattern.test(url) || /alarm/i.test(url)) return url;
-            if (url.includes('strStatus=')) {
+            if (!listEndpointPattern.test(url) || isAlarmRequest(url, null)) return url;
+            if (/(?:^|[?&])strStatus=[^&]*/.test(url)) {
               return url.replace(/(^|[?&])strStatus=[^&]*/, '$1strStatus=0%2C1');
+            } else {
+              const sep = url.includes('?') ? '&' : '?';
+              return url + sep + 'strStatus=0%2C1';
             }
-            return url;
           };
 
           const updateStatusButtonLabel = () => {
@@ -133,12 +171,14 @@ internal static class FtmsFilterRetentionScript
               return t.includes('trang thai') && !t.includes('vung mien');
             });
             if (!statusBtn) return;
-            if (!statusBtn.innerText.includes('(2)')) {
-              for (const node of statusBtn.childNodes) {
-                if (node.nodeType === Node.TEXT_NODE && /trạng\s*thái/i.test(node.textContent || '')) {
-                  node.textContent = node.textContent.replace(/trạng\s*thái(?:\s*\([^)]*\))?/i, 'Trạng thái (2)');
-                }
+            let updated = false;
+            for (const node of statusBtn.childNodes) {
+              if (node.nodeType === Node.TEXT_NODE && /trạng\s*thái/i.test(node.textContent || '')) {
+                node.textContent = node.textContent.replace(/trạng\s*thái(?:\s*\([^)]*\))?/i, 'Trạng thái (2)');
+                updated = true;
               }
+            }
+            if (!updated) {
               const children = statusBtn.querySelectorAll('span, div');
               for (const child of children) {
                 if (/trạng\s*thái/i.test(child.innerText || '') && !child.children.length) {
@@ -146,6 +186,10 @@ internal static class FtmsFilterRetentionScript
                   break;
                 }
               }
+            }
+            const badge = statusBtn.querySelector('.badge, [class*="badge"], [class*="count"]');
+            if (badge && badge.innerText !== '2') {
+              badge.innerText = '2';
             }
           };
 
@@ -174,20 +218,14 @@ internal static class FtmsFilterRetentionScript
             updateStatusButtonLabel();
           };
 
-          // If previously retained via sessionStorage, apply UI sync
-          if (myTicketJustToggled) {
-            setTimeout(updateStatusButtonLabel, 500);
-            setTimeout(updateStatusButtonLabel, 1500);
-            setTimeout(updateStatusButtonLabel, 3000);
-          }
-
           // Capture click events
           document.addEventListener('click', e => {
             if (isMyTicketButton(e.target)) {
               myTicketJustToggled = true;
               toggleTimestamp = Date.now();
               try { sessionStorage.setItem('ftms_companion_retain_status', 'true'); } catch { }
-              setTimeout(updateStatusButtonLabel, 200);
+              setTimeout(updateStatusButtonLabel, 100);
+              setTimeout(updateStatusButtonLabel, 300);
               setTimeout(updateStatusButtonLabel, 600);
               setTimeout(updateStatusButtonLabel, 1200);
               setTimeout(updateStatusButtonLabel, 2500);
@@ -195,9 +233,10 @@ internal static class FtmsFilterRetentionScript
             }
 
             if (isStatusToggleButton(e.target)) {
-              if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) {
+              if (myTicketJustToggled || (Date.now() - toggleTimestamp < 30000)) {
                 setTimeout(syncStatusDropdownUi, 50);
                 setTimeout(syncStatusDropdownUi, 150);
+                setTimeout(syncStatusDropdownUi, 300);
               }
               return;
             }
@@ -216,17 +255,19 @@ internal static class FtmsFilterRetentionScript
             window.fetch = function(input, init) {
               try {
                 let url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
-                if (!/alarm/i.test(url) && listEndpointPattern.test(url)) {
-                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 6000)) {
+                const body = init?.body;
+                if (listEndpointPattern.test(url) && !isAlarmRequest(url, body)) {
+                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) {
                     if (init && init.body) {
                       init.body = modifyStatusInPayload(init.body);
                     }
-                    if (url.includes('strStatus=')) {
-                      const newUrl = modifyUrl(url);
+                    const newUrl = modifyUrl(url);
+                    if (newUrl !== url) {
                       if (typeof input === 'string') input = newUrl;
                       else if (input instanceof URL) input = new URL(newUrl);
                     }
-                    setTimeout(updateStatusButtonLabel, 300);
+                    setTimeout(updateStatusButtonLabel, 200);
+                    setTimeout(updateStatusButtonLabel, 600);
                   }
                 }
               } catch { }
@@ -242,20 +283,27 @@ internal static class FtmsFilterRetentionScript
 
             OrigXHR.prototype.open = function(method, url) {
               try {
-                if (myTicketJustToggled || (Date.now() - toggleTimestamp < 6000)) {
-                  url = modifyUrl(url);
-                }
                 this.__filterUrl = String(url || '');
+                if (listEndpointPattern.test(this.__filterUrl) && !isAlarmRequest(this.__filterUrl, null)) {
+                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) {
+                    const newUrl = modifyUrl(url);
+                    if (newUrl !== url) {
+                      url = newUrl;
+                      arguments[1] = url;
+                    }
+                  }
+                }
               } catch { }
               return origOpen.apply(this, arguments);
             };
 
             OrigXHR.prototype.send = function(body) {
               try {
-                if (this.__filterUrl && !/alarm/i.test(this.__filterUrl) && listEndpointPattern.test(this.__filterUrl)) {
-                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 6000)) {
+                if (this.__filterUrl && listEndpointPattern.test(this.__filterUrl) && !isAlarmRequest(this.__filterUrl, body)) {
+                  if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) {
                     body = modifyStatusInPayload(body);
-                    setTimeout(updateStatusButtonLabel, 300);
+                    setTimeout(updateStatusButtonLabel, 200);
+                    setTimeout(updateStatusButtonLabel, 600);
                   }
                 }
               } catch { }
