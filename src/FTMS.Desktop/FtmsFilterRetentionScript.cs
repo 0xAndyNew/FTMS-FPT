@@ -13,7 +13,7 @@ internal static class FtmsFilterRetentionScript
             .toLowerCase()
             .trim();
 
-          const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases|getlist)/i;
+          const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases)/i;
 
           let manualOverride = false;
           try {
@@ -54,7 +54,6 @@ internal static class FtmsFilterRetentionScript
 
           const isMyTicketButton = el => {
             if (!el) return false;
-            // Ignore any elements in header or top navigation (avatar, alarm bell, search bar)
             if (el.closest('header, nav, .main-header, .navbar, #header, .header')) return false;
 
             const btn = el.closest('button, [role="button"], a, .btn, .ant-switch, [role="switch"], label');
@@ -72,7 +71,6 @@ internal static class FtmsFilterRetentionScript
             if (textProps.includes('cua toi') || textProps.includes('my ticket') || textProps.includes('ca nhan'))
               return true;
 
-            // In the ticket filter toolbar, the "Của tôi" button is right next to the "Vùng miền" button
             const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a, .btn'));
             const vmBtn = allBtns.find(b => norm(b.innerText).includes('vung mien'));
             if (vmBtn) {
@@ -95,7 +93,7 @@ internal static class FtmsFilterRetentionScript
               const cls = norm(icon.getAttribute('class') || '') + ' ' + norm(btn.getAttribute('class') || '');
               if (cls.includes('user') || cls.includes('person') || cls.includes('avatar') || cls.includes('profile'))
                 return true;
-              if (icon.tagName && icon.tagName.toLowerCase() === 'svg' && icon.querySelector('circle') && icon.querySelector('path')) {
+              if (icon.tagName && icon.tagName.toLowerCase() === 'svg') {
                 if (vmBtn && allBtns.indexOf(btn) > allBtns.indexOf(vmBtn) && allBtns.indexOf(btn) <= allBtns.indexOf(vmBtn) + 2)
                   return true;
               }
@@ -145,17 +143,6 @@ internal static class FtmsFilterRetentionScript
               }
             } catch { }
             return body;
-          };
-
-          const modifyUrl = url => {
-            if (!url || typeof url !== 'string') return url;
-            if (!listEndpointPattern.test(url) || isAlarmRequest(url, null)) return url;
-            if (/(?:^|[?&])strStatus=[^&]*/.test(url)) {
-              return url.replace(/(^|[?&])strStatus=[^&]*/, '$1strStatus=0%2C1');
-            } else {
-              const sep = url.includes('?') ? '&' : '?';
-              return url + sep + 'strStatus=0%2C1';
-            }
           };
 
           const updateStatusButtonLabel = () => {
@@ -266,22 +253,17 @@ internal static class FtmsFilterRetentionScript
             }
           }, true);
 
-          // Wrap fetch
+          // Wrap fetch (NEVER touches URL to avoid corrupting alarm query)
           const origFetch = window.fetch;
           if (typeof origFetch === 'function') {
             window.fetch = function(input, init) {
               try {
-                let url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
+                const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
                 const body = init?.body;
                 if (listEndpointPattern.test(url) && !isAlarmRequest(url, body)) {
                   if (shouldRetainStatus()) {
                     if (init && init.body) {
                       init.body = modifyStatusInPayload(init.body);
-                    }
-                    const newUrl = modifyUrl(url);
-                    if (newUrl !== url) {
-                      if (typeof input === 'string') input = newUrl;
-                      else if (input instanceof URL) input = new URL(newUrl);
                     }
                     setTimeout(updateStatusButtonLabel, 200);
                     setTimeout(updateStatusButtonLabel, 600);
@@ -292,7 +274,7 @@ internal static class FtmsFilterRetentionScript
             };
           }
 
-          // Wrap XMLHttpRequest
+          // Wrap XMLHttpRequest (NEVER touches URL in open to avoid corrupting alarm query)
           const OrigXHR = window.XMLHttpRequest;
           if (typeof OrigXHR === 'function') {
             const origOpen = OrigXHR.prototype.open;
@@ -301,15 +283,6 @@ internal static class FtmsFilterRetentionScript
             OrigXHR.prototype.open = function(method, url) {
               try {
                 this.__filterUrl = String(url || '');
-                if (listEndpointPattern.test(this.__filterUrl) && !isAlarmRequest(this.__filterUrl, null)) {
-                  if (shouldRetainStatus()) {
-                    const newUrl = modifyUrl(url);
-                    if (newUrl !== url) {
-                      url = newUrl;
-                      arguments[1] = url;
-                    }
-                  }
-                }
               } catch { }
               return origOpen.apply(this, arguments);
             };
