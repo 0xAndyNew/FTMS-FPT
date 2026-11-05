@@ -13,10 +13,20 @@ internal static class FtmsFilterRetentionScript
             .toLowerCase()
             .trim();
 
-          const listEndpointPattern = /\/ihub\/(?:.*\/)?(?:getlistrequest|getlistcases)/i;
+          const listEndpointPattern = /\/ihub\/(?:request|cases)\/(?:getlistrequest|getlistcases)/i;
 
+          let myTicketJustToggled = false;
+          let toggleTimestamp = 0;
           let manualOverride = false;
-          const shouldRetainStatus = () => !manualOverride;
+
+          const shouldRetainStatus = () => {
+            if (manualOverride) return false;
+            if (myTicketJustToggled || (Date.now() - toggleTimestamp < 15000)) return true;
+            try {
+              return sessionStorage.getItem('ftms_companion_retain_status') === 'true';
+            } catch { }
+            return false;
+          };
 
           const isAlarmRequest = (url, body) => {
             const u = String(url || '');
@@ -96,6 +106,22 @@ internal static class FtmsFilterRetentionScript
             }
 
             return false;
+          };
+
+          const isStatusToggleButton = el => {
+            if (!el) return false;
+            const btn = el.closest('button, [role="button"], a, .btn');
+            if (!btn) return false;
+            const text = norm(btn.innerText || btn.getAttribute('title') || '');
+            return text.includes('trang thai') && !text.includes('vung mien');
+          };
+
+          const isStatusDropdownElement = el => {
+            if (!el) return false;
+            const container = el.closest('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, .ant-dropdown, div[class*="dropdown"], div[class*="popover"]');
+            if (!container) return false;
+            const text = norm(container.innerText);
+            return text.includes('tat ca') && text.includes('moi') && text.includes('phan cong');
           };
 
           const modifyStatusInPayload = body => {
@@ -180,7 +206,8 @@ internal static class FtmsFilterRetentionScript
             }
           };
 
-          const syncStatusDropdownUi = () => {
+          // Visually reflect checkboxes when dropdown is opened WITHOUT calling .click() or triggering network requests
+          const syncStatusDropdownUiVisualOnly = () => {
             if (!shouldRetainStatus()) return;
             const containers = document.querySelectorAll('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, .ant-dropdown, div[class*="dropdown"], div[class*="popover"]');
             for (const container of containers) {
@@ -191,32 +218,22 @@ internal static class FtmsFilterRetentionScript
                   const itemText = norm(item.innerText);
                   const checkbox = item.querySelector('input[type="checkbox"], [role="checkbox"]') ||
                                     (item.getAttribute('role') === 'checkbox' ? item : null);
-                  const isChecked = checkbox ? (checkbox.checked === true ||
-                                    checkbox.getAttribute('aria-checked') === 'true' ||
-                                    checkbox.classList.contains('checked') ||
-                                    checkbox.classList.contains('ant-checkbox-checked') ||
-                                    item.classList.contains('active') ||
-                                    item.classList.contains('selected') ||
-                                    item.classList.contains('ant-select-item-option-selected')) : false;
 
                   const isTatCa = itemText.startsWith('tat ca');
                   const isMoi = itemText.startsWith('moi') || (itemText.includes('moi') && !itemText.includes('lam moi'));
                   const isPhanCong = itemText.startsWith('phan cong') || itemText.includes('phan cong');
-                  const isOther = itemText.includes('dang thuc hien') || itemText.includes('hoan thanh') ||
-                                  itemText.includes('tam ngung') || itemText.includes('dong') || itemText.includes('huy');
 
-                  const triggerToggle = () => {
-                    const clickTarget = item.querySelector('.ant-checkbox-wrapper, label') || checkbox || item;
-                    clickTarget.click();
-                    try { clickTarget.dispatchEvent(new Event('change', { bubbles: true })); } catch { }
-                  };
-
-                  if (isTatCa && isChecked) {
-                    triggerToggle();
-                  } else if ((isMoi || isPhanCong) && !isChecked) {
-                    triggerToggle();
-                  } else if (isOther && isChecked) {
-                    triggerToggle();
+                  const shouldBeChecked = isMoi || isPhanCong;
+                  if (checkbox) {
+                    if (checkbox.checked !== undefined) checkbox.checked = shouldBeChecked;
+                    checkbox.setAttribute('aria-checked', shouldBeChecked ? 'true' : 'false');
+                    if (shouldBeChecked) {
+                      checkbox.classList.add('checked', 'ant-checkbox-checked');
+                      item.classList.add('active', 'selected', 'ant-select-item-option-selected');
+                    } else {
+                      checkbox.classList.remove('checked', 'ant-checkbox-checked');
+                      item.classList.remove('active', 'selected', 'ant-select-item-option-selected');
+                    }
                   }
                 }
               }
@@ -224,88 +241,68 @@ internal static class FtmsFilterRetentionScript
             updateStatusButtonLabel();
           };
 
-          let syncScheduled = false;
-          const scheduleUiSync = () => {
-            if (syncScheduled) return;
-            syncScheduled = true;
-            requestAnimationFrame(() => {
-              syncScheduled = false;
-              syncStatusDropdownUi();
-              updateStatusButtonLabel();
-            });
-          };
-
-          // Observe DOM changes to maintain UI labels and dropdown states
-          const observer = new MutationObserver(scheduleUiSync);
-          if (document.body) {
-            observer.observe(document.body, { childList: true, subtree: true });
-          } else {
-            addEventListener('DOMContentLoaded', () => {
-              if (document.body) observer.observe(document.body, { childList: true, subtree: true });
-            });
-          }
-
-          // Initial UI runs
-          setTimeout(scheduleUiSync, 200);
-          setTimeout(scheduleUiSync, 600);
-          setTimeout(scheduleUiSync, 1200);
-          setTimeout(scheduleUiSync, 2500);
-
           // Capture click events
           document.addEventListener('click', e => {
             if (isMyTicketButton(e.target)) {
               manualOverride = false;
-              setTimeout(scheduleUiSync, 100);
-              setTimeout(scheduleUiSync, 300);
-              setTimeout(scheduleUiSync, 600);
-              setTimeout(scheduleUiSync, 1200);
+              myTicketJustToggled = true;
+              toggleTimestamp = Date.now();
+              try {
+                sessionStorage.setItem('ftms_companion_retain_status', 'true');
+              } catch { }
+              setTimeout(updateStatusButtonLabel, 200);
+              setTimeout(updateStatusButtonLabel, 600);
+              setTimeout(updateStatusButtonLabel, 1200);
               return;
             }
 
-            // If user explicitly clicks inside a status dropdown option other than Mới/Phân công
-            const container = e.target.closest?.('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, .ant-dropdown, div[class*="dropdown"], div[class*="popover"]');
-            if (container && e.isTrusted) {
-              const text = norm(container.innerText);
-              if (text.includes('tat ca') && text.includes('moi') && text.includes('phan cong')) {
-                const targetText = norm(e.target.innerText || e.target.closest('li, label, div, [role="option"]')?.innerText || '');
-                const isExplicitManualChoice = targetText.includes('dang thuc hien') || targetText.includes('hoan thanh') ||
-                                               targetText.includes('tam ngung') || targetText.includes('dong') || targetText.includes('huy');
-                if (isExplicitManualChoice) {
-                  manualOverride = true;
-                }
+            if (isStatusToggleButton(e.target)) {
+              if (shouldRetainStatus()) {
+                setTimeout(syncStatusDropdownUiVisualOnly, 50);
+                setTimeout(syncStatusDropdownUiVisualOnly, 150);
               }
+              return;
             }
 
-            setTimeout(scheduleUiSync, 50);
-            setTimeout(scheduleUiSync, 200);
+            // User explicitly clicking dropdown items
+            if (e.isTrusted && isStatusDropdownElement(e.target)) {
+              const targetText = norm(e.target.innerText || e.target.closest('li, label, div, [role="option"]')?.innerText || '');
+              const isOtherStatus = targetText.includes('dang thuc hien') || targetText.includes('hoan thanh') ||
+                                    targetText.includes('tam ngung') || targetText.includes('dong') || targetText.includes('huy') ||
+                                    targetText.startsWith('tat ca');
+              if (isOtherStatus) {
+                manualOverride = true;
+                myTicketJustToggled = false;
+                toggleTimestamp = 0;
+                try {
+                  sessionStorage.removeItem('ftms_companion_retain_status');
+                } catch { }
+              }
+            }
           }, true);
 
-          // Wrap fetch (NEVER touches URL to avoid corrupting alarm query)
+          // Wrap fetch
           const origFetch = window.fetch;
           if (typeof origFetch === 'function') {
             window.fetch = function(input, init) {
               try {
                 const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
                 const body = init?.body;
-                if (listEndpointPattern.test(url) && !isAlarmRequest(url, body)) {
-                  if (shouldRetainStatus()) {
-                    if (init && init.body) {
-                      init.body = modifyStatusInPayload(init.body);
-                    }
-                    setTimeout(scheduleUiSync, 200);
-                    setTimeout(scheduleUiSync, 600);
+                if (listEndpointPattern.test(url) && !isAlarmRequest(url, body) && shouldRetainStatus()) {
+                  if (init && init.body) {
+                    init.body = modifyStatusInPayload(init.body);
                   }
                 }
               } catch { }
               const promise = origFetch.apply(this, arguments);
               if (promise && typeof promise.then === 'function') {
-                promise.then(() => setTimeout(scheduleUiSync, 100)).catch(() => {});
+                promise.then(() => setTimeout(updateStatusButtonLabel, 200)).catch(() => {});
               }
               return promise;
             };
           }
 
-          // Wrap XMLHttpRequest (NEVER touches URL in open to avoid corrupting alarm query)
+          // Wrap XMLHttpRequest
           const OrigXHR = window.XMLHttpRequest;
           if (typeof OrigXHR === 'function') {
             const origOpen = OrigXHR.prototype.open;
@@ -320,18 +317,18 @@ internal static class FtmsFilterRetentionScript
 
             OrigXHR.prototype.send = function(body) {
               try {
-                if (this.__filterUrl && listEndpointPattern.test(this.__filterUrl) && !isAlarmRequest(this.__filterUrl, body)) {
-                  if (shouldRetainStatus()) {
-                    body = modifyStatusInPayload(body);
-                    this.addEventListener('loadend', () => setTimeout(scheduleUiSync, 100), { once: true });
-                    setTimeout(scheduleUiSync, 200);
-                    setTimeout(scheduleUiSync, 600);
-                  }
+                if (this.__filterUrl && listEndpointPattern.test(this.__filterUrl) && !isAlarmRequest(this.__filterUrl, body) && shouldRetainStatus()) {
+                  body = modifyStatusInPayload(body);
+                  this.addEventListener('loadend', () => setTimeout(updateStatusButtonLabel, 200), { once: true });
                 }
               } catch { }
               return arguments.length ? origSend.call(this, body) : origSend.apply(this, arguments);
             };
           }
+
+          // Initial label update on load
+          setTimeout(updateStatusButtonLabel, 400);
+          setTimeout(updateStatusButtonLabel, 1200);
         })();
         """;
 }
