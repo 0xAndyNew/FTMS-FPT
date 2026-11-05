@@ -347,8 +347,9 @@ public partial class CompactWindow : Window
             if (mutationType == "ftms-assignment-mutation")
             {
                 if (!payload.RootElement.TryGetProperty("assigneeId", out var assigneeValue) ||
-                    !assigneeValue.TryGetInt64(out var assigneeId) || assigneeId <= 0) return;
-                var assigneeName = payload.RootElement.TryGetProperty("assigneeName", out var nameVal) ? nameVal.GetString() : null;
+                    !assigneeValue.TryGetInt64(out var assigneeId) || assigneeId < 0) return;
+                var assigneeName = payload.RootElement.TryGetProperty("assigneeName", out var nameVal) &&
+                    !string.IsNullOrWhiteSpace(nameVal.GetString()) ? nameVal.GetString() : null;
                 TicketStatus? assignmentStatus = null;
                 if (payload.RootElement.TryGetProperty("status", out var stVal) && stVal.TryGetInt32(out var parsedSt) && Enum.IsDefined(typeof(TicketStatus), parsedSt))
                     assignmentStatus = (TicketStatus)parsedSt;
@@ -389,7 +390,6 @@ public partial class CompactWindow : Window
                 .ToOffset(TimeSpan.FromHours(7));
             await monitor.ApplyConfirmedAssignmentMutationAsync(code, expectedAssigneeId,
                 expectedAssigneeName, actor, status, cancellationToken, mutationTime);
-            if (monitor.TryGetTrackedStatus(code, out var curStatus) && (status is null || curStatus == status.Value)) return;
             await monitor.SyncUntilAssignmentAsync(code, expectedAssigneeId, cancellationToken);
         });
     }

@@ -101,13 +101,19 @@ internal static class FtmsStatusMutationScript
                 'note','input[note]','reason','input[reason]','content','input[content]','message','description']) || null;
 
               if (mutationType === 'assignment') {
+                const currentUserId = Number(typeof globalThis.userID !== 'undefined' ? globalThis.userID : 0);
                 const assigneeId = Number(read(entries, ['staffId','staff_ID','input[staffId]','input[staff_ID]',
-                  'assigneeId','agentId']) || (typeof globalThis.userID !== 'undefined' ? globalThis.userID : 0));
-                const assigneeName = read(entries, ['staffName','input[staffName]','assigneeName']) || actor;
+                  'assigneeId','agentId']) || currentUserId);
+                let assigneeName = read(entries, ['staffName','input[staffName]','assigneeName','assignedToName','targetStaffName']) || '';
+                if (!assigneeName && assigneeId > 0 && assigneeId === currentUserId) {
+                  assigneeName = actor;
+                }
                 const status = statusOf(read(entries, ['input[ticketStatus]','ticketStatus','status','statusCode']));
-                if (!Number.isInteger(assigneeId) || assigneeId <= 0) return;
+                if (!Number.isInteger(assigneeId) || assigneeId < 0) return;
                 window.chrome?.webview?.postMessage({
-                  type: 'ftms-assignment-mutation', code: code.toUpperCase(), assigneeId, assigneeName, actor,
+                  type: 'ftms-assignment-mutation', code: code.toUpperCase(), assigneeId,
+                  assigneeName: assigneeName || undefined,
+                  actor: actor || undefined,
                   status: status ?? undefined,
                   note: note || undefined,
                   detectedAt: Date.now()

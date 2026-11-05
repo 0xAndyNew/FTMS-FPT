@@ -67,7 +67,7 @@ public static partial class NotificationFormatter
         var shouldShowAssignee = item.EventType is not (TicketEventType.AssignmentChanged or TicketEventType.UnassignedReminder) &&
             (item.EventType != TicketEventType.Created || (!string.IsNullOrWhiteSpace(ticket.AssigneeName) && ticket.AssigneeName.Trim() != "---" && ticket.AssigneeName.Trim() != "Chưa nhận"));
         if (shouldShowAssignee)
-            text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
+            text.AppendLine($"👨‍💼 <b>Người xử lý:</b> {Escape(FormatAssignee(ticket.AssigneeId, ticket.AssigneeName))}");
         if (ticket.CreatedAt is not null)
             text.AppendLine($"⏰ <b>Thời gian tạo:</b> {FormatVietnamTime(ticket.CreatedAt.Value)}");
         var ageMinutes = ticket.CreatedAt is null ? 0 : Math.Max(0, (int)(item.DetectedAt - ticket.CreatedAt.Value).TotalMinutes);
@@ -105,7 +105,7 @@ public static partial class NotificationFormatter
         if (item.EventType == TicketEventType.AssignmentChanged)
         {
             if (AssigneeChanged(item))
-                text.AppendLine($"👥 <b>Người xử lý:</b> {Escape(NormalizeEmpty(item.PreviousAssigneeName, "Chưa nhận"))} ➔ {Escape(NormalizeEmpty(ticket.AssigneeName, "Chưa nhận"))}");
+                text.AppendLine($"👥 <b>Người xử lý:</b> {Escape(FormatAssignee(item.PreviousAssigneeId, item.PreviousAssigneeName))} ➔ {Escape(FormatAssignee(ticket.AssigneeId, ticket.AssigneeName))}");
             if (DepartmentChanged(item))
                 text.AppendLine($"🏢 <b>Phòng ban:</b> {Escape(NormalizeEmpty(item.PreviousDepartmentName, "Chưa có"))} ➔ {Escape(NormalizeEmpty(ticket.DepartmentName, "Chưa có"))}");
         }
@@ -296,6 +296,13 @@ public static partial class NotificationFormatter
             ? item.PreviousDepartmentId != item.Snapshot.DepartmentId
             : !string.Equals(item.PreviousDepartmentName, item.Snapshot.DepartmentName,
                 StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatAssignee(long? id, string? name)
+    {
+        if (HasAssigneeName(name)) return name!.Trim();
+        if (id is null or 0) return "Chưa nhận";
+        return $"Nhân viên #{id}";
+    }
 
     private static bool HasAssigneeName(string? value) =>
         !string.IsNullOrWhiteSpace(value) && value.Trim() != "---" &&

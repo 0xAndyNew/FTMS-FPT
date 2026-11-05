@@ -715,6 +715,116 @@ public sealed class TicketMonitorTests
     }
 
     [Fact]
+    public async Task ApplyConfirmedAssignmentMutation_TransferWithKnownStaff_ResolvesNameAndNotifiesImmediately()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var ticket1 = new TicketSnapshot
+        {
+            Code = "RQ-TRANSFER-1",
+            Status = TicketStatus.InProgress,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2"
+        };
+        var ticket2 = new TicketSnapshot
+        {
+            Code = "RQ-OTHER-STAFF",
+            Status = TicketStatus.InProgress,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = 2540,
+            AssigneeName = "ChanhTX"
+        };
+
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, departmentName),
+            [ticket1, ticket2]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        // User transfers RQ-TRANSFER-1 to staff 2540 with NO name in payload
+        await monitor.ApplyConfirmedAssignmentMutationAsync(ticket1.Code, 2540, null, "HieuDX2", null, CancellationToken.None);
+
+        var assignmentEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == ticket1.Code && e.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(2962, assignmentEvent.PreviousAssigneeId);
+        Assert.Equal("HieuDX2", assignmentEvent.PreviousAssigneeName);
+        Assert.Equal(2540, assignmentEvent.Snapshot.AssigneeId);
+        Assert.Equal("ChanhTX", assignmentEvent.Snapshot.AssigneeName);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("HieuDX2", message);
+        Assert.Contains("ChanhTX", message);
+        Assert.DoesNotContain("Chưa nhận", message);
+
+        // FTMS API lags and still returns 2962 for RQ-TRANSFER-1
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Must NOT roll back or send duplicate event
+        Assert.Single(store.SavedEvents, e => e.TicketCode == ticket1.Code && e.EventType == TicketEventType.AssignmentChanged);
+    }
+
+    [Fact]
+    public async Task ApplyConfirmedAssignmentMutation_TransferWithUnknownStaff_DoesNotNotifyChuaNhanAndWaitsForApi()
+    {
+        var departmentName = "TOC - Phòng Dịch vụ Data Center";
+        var ticket = new TicketSnapshot
+        {
+            Code = "RQ-TRANSFER-UNKNOWN",
+            Status = TicketStatus.InProgress,
+            DepartmentId = 86016,
+            DepartmentName = departmentName,
+            AssigneeId = 2962,
+            AssigneeName = "HieuDX2"
+        };
+
+        var client = new FakeFtmsClient(
+            new CurrentUserIdentity(2962, "HieuDX2", 86016, departmentName),
+            [ticket]);
+        var store = new MemoryStore();
+        var monitor = new TicketMonitor(client, store, new NullSender(),
+            new TicketChangeDetector(), new AppSettings());
+
+        await monitor.InitializeAsync(CancellationToken.None);
+        await monitor.SyncNowAsync(CancellationToken.None);
+        store.SavedEvents.Clear();
+        store.SavedMessages.Clear();
+
+        // Transfer to unknown staff 9999 without name
+        await monitor.ApplyConfirmedAssignmentMutationAsync(ticket.Code, 9999, null, "HieuDX2", null, CancellationToken.None);
+
+        // MUST NOT send premature notification with "Chưa nhận"
+        Assert.Empty(store.SavedEvents);
+        Assert.Empty(store.SavedMessages);
+
+        // FTMS API now returns the updated ticket with resolved name
+        var updatedFromApi = ticket with
+        {
+            AssigneeId = 9999,
+            AssigneeName = "NewTechnician"
+        };
+        client.CurrentTickets = [updatedFromApi];
+        await monitor.SyncNowAsync(CancellationToken.None);
+
+        // Now sends accurate notification with the real name
+        var assignmentEvent = Assert.Single(store.SavedEvents, e => e.TicketCode == ticket.Code && e.EventType == TicketEventType.AssignmentChanged);
+        Assert.Equal(2962, assignmentEvent.PreviousAssigneeId);
+        Assert.Equal(9999, assignmentEvent.Snapshot.AssigneeId);
+        Assert.Equal("NewTechnician", assignmentEvent.Snapshot.AssigneeName);
+
+        var message = Assert.Single(store.SavedMessages);
+        Assert.Contains("HieuDX2", message);
+        Assert.Contains("NewTechnician", message);
+        Assert.DoesNotContain("Chưa nhận", message);
+    }
+
+    [Fact]
     public async Task TriggerSync_WakesUpRunAsyncImmediatelyWithoutWaitingInterval()
     {
         var client = new FakeFtmsClient(null, []);
