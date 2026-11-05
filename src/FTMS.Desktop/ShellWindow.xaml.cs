@@ -13,7 +13,7 @@ namespace FTMS.Desktop;
 
 public partial class ShellWindow : Window
 {
-    private const string FtmsUrl = "https://ftms.fpt.net/ihub/list?tab=2";
+    private const string FtmsUrl = "https://ftms.fpt.net/ihub/react/list?referrer=menu";
     private readonly SettingsStore _settingsStore = new();
     private readonly HttpClient _telegramHttp;
     private CancellationTokenSource _lifetime = new();
@@ -92,7 +92,7 @@ public partial class ShellWindow : Window
     {
         _refreshTimer.Stop();
         if (!_settingsStore.Current.AutoRefreshEnabled) return;
-        _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settingsStore.Current.AutoRefreshSeconds, 5, 3600));
+        _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settingsStore.Current.AutoRefreshSeconds, 1, 3600));
         _refreshTimer.Start();
     }
 

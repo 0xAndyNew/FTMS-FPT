@@ -31,7 +31,8 @@ public partial class CompactSettingsWindow : Window
             ShowTestStatus("HTTP proxy phải có dạng http://host:port (không chứa tài khoản hoặc đường dẫn).", false);
             return;
         }
-        var seconds = int.TryParse(RefreshSecondsBox.Text, out var value) ? Math.Clamp(value, 5, 3600) : 30;
+        var text = new string((RefreshSecondsBox.Text ?? "").Where(char.IsDigit).ToArray());
+        var seconds = int.TryParse(text, out var value) ? Math.Clamp(value, 1, 3600) : 30;
         _store.Save(new DesktopSettings(TokenBox.Password.Trim(), ChatIdBox.Text.Trim(), StartupCheck.IsChecked == true,
             AutoRefreshCheck.IsChecked == true, seconds, proxyUrl));
         DialogResult = true;
@@ -62,7 +63,7 @@ public partial class CompactSettingsWindow : Window
             var response = await http.PostAsJsonAsync($"https://api.telegram.org/bot{token}/sendMessage", new
             {
                 chat_id = chatId,
-                text = $"FTMS Companion: K\u1ebft n\u1ed1i Telegram th\u00e0nh c\u00f4ng l\u00fac {DateTime.Now:dd/MM/yyyy HH:mm:ss}.",
+                text = $"FTMS Companion: K\u1ebft n\u1ed1i Telegram th\u00e0nh c\u00f4ng l\u00fac {DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7)):HH:mm:ss dd/MM/yyyy}.",
                 disable_web_page_preview = true
             });
             if (response.IsSuccessStatusCode)

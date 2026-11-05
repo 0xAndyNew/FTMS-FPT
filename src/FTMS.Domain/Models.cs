@@ -93,6 +93,8 @@ public sealed record TicketSnapshot
     public LatestEmail? LatestEmail { get; init; }
     public string? ResponseReminderEmailId { get; init; }
     public DateTimeOffset? ResponseReminderSince { get; init; }
+    public int? UnassignedReminderBucket { get; init; }
+    public int? ResponseReminderBucket { get; init; }
     public bool IsTerminal { get; init; }
 }
 
@@ -109,7 +111,9 @@ public sealed record TicketEvent
     public required string Reason { get; init; }
     public string? ChangedBy { get; init; }
     public DateTimeOffset? ChangedAt { get; init; }
+    public long? PreviousAssigneeId { get; init; }
     public string? PreviousAssigneeName { get; init; }
+    public long? PreviousDepartmentId { get; init; }
     public string? PreviousDepartmentName { get; init; }
     public LatestEmail? LatestEmail { get; init; }
     public string? Note { get; init; }
@@ -118,7 +122,7 @@ public sealed record TicketEvent
 
 public sealed record AppSettings
 {
-    public string FtmsUrl { get; init; } = "https://ftms.fpt.net/ihub/list?tab=2";
+    public string FtmsUrl { get; init; } = "https://ftms.fpt.net/ihub/react/list";
     public int PollIntervalSeconds { get; init; } = 30;
     public int IdleDelaySeconds { get; init; } = 10;
     public bool AutoRefreshEnabled { get; init; } = true;
@@ -127,7 +131,7 @@ public sealed record AppSettings
     public int[] SlaThresholds { get; init; } = [5, 3, 1];
     public int TerminalRetentionDays { get; init; } = 1;
     public bool UnprocessedIsTerminal { get; init; } = true;
-    public int HistoryIntervalSeconds { get; init; } = 60;
+    public int HistoryIntervalSeconds { get; init; } = 15;
 }
 
 public sealed record CurrentUserIdentity(long UserId, string? UserName, long? DepartmentId, string? DepartmentName);

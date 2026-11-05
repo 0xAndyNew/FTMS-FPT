@@ -146,7 +146,7 @@ public sealed class TelegramTransportTests
 
         var formatted = FTMS.Application.NotificationFormatter.Format(evt, "https://ftms.fpt.net");
 
-        Assert.Contains("⏰ <b>Thời gian tạo:</b> 02/10/2026 14:30 (UTC+07:00)", formatted);
+        Assert.Contains("⏰ <b>Thời gian tạo:</b> 14:30:00 02/10/2026", formatted);
         Assert.Contains("🕰 <b>Thời gian từ lúc tạo ticket:</b> 25 phút", formatted);
         Assert.DoesNotContain("tồn tại từ lúc nhận ticket", formatted);
     }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using FTMS.Domain;
@@ -9,10 +10,13 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
 {
     private readonly Dictionary<string, TicketSnapshot> _active = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TicketSnapshot> _closedCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<long, string> _knownStaffNames = new();
     private readonly Dictionary<string, int> _missingMonitoredAttempts = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _terminalTombstones = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (TicketStatus Status, DateTimeOffset Timestamp)> _recentStatusMutations = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (long AssigneeId, string? AssigneeName, DateTimeOffset Timestamp)> _recentAssignmentMutations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _recentClaims = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan ClaimStatusCoalescingWindow = TimeSpan.FromSeconds(30);
     private readonly SemaphoreSlim _syncLock = new(1, 1);
     private readonly SemaphoreSlim _stateLock = new(1, 1);
     private TaskCompletionSource<bool> _wakeSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -57,7 +61,14 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         await store.InitializeAsync(cancellationToken);
-        foreach (var item in await store.LoadActiveSnapshotsAsync(cancellationToken)) _active[item.Key] = item.Value;
+        foreach (var item in await store.LoadActiveSnapshotsAsync(cancellationToken))
+        {
+            _active[item.Key] = item.Value;
+            if (item.Value.AssigneeId is not null and not 0 && HasAssignedName(item.Value.AssigneeName))
+            {
+                _knownStaffNames[item.Value.AssigneeId.Value] = item.Value.AssigneeName!;
+            }
+        }
         await CheckAndRunDailyCleanupAsync(cancellationToken);
     }
 
@@ -80,7 +91,6 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 {
                     if (!await client.IsAuthenticatedAsync(cancellationToken))
                     {
-                        SummaryChanged?.Invoke(UnavailableSummary());
                         await client.BeginLoginRecoveryAsync(cancellationToken);
                     }
                     else
@@ -91,7 +101,6 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
                 catch (UnauthorizedAccessException)
                 {
-                    SummaryChanged?.Invoke(UnavailableSummary());
                     await client.BeginLoginRecoveryAsync(cancellationToken);
                 }
                 catch (Exception ex) { StatusChanged?.Invoke($"Loi: {ex.Message}"); }
@@ -205,15 +214,54 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         string? expectedAssigneeName, string? actor, TicketStatus? newStatusHint,
         CancellationToken cancellationToken, DateTimeOffset? detectedAt = null)
     {
-        if (string.IsNullOrWhiteSpace(code) || expectedAssigneeId <= 0) return;
+        if (string.IsNullOrWhiteSpace(code) || expectedAssigneeId < 0) return;
 
         var now = (detectedAt ?? DateTimeOffset.UtcNow).ToOffset(TimeSpan.FromHours(7));
         await _stateLock.WaitAsync(cancellationToken);
         try
         {
-            _recentAssignmentMutations[code] = (expectedAssigneeId, expectedAssigneeName, DateTimeOffset.UtcNow);
+            var cleanExpectedName = string.IsNullOrWhiteSpace(expectedAssigneeName) ? null : expectedAssigneeName.Trim();
+            var identity = await client.GetCurrentUserAsync(cancellationToken);
+            if (identity is not null && identity.UserId > 0 && !string.IsNullOrWhiteSpace(identity.UserName))
+                _knownStaffNames[identity.UserId] = identity.UserName;
+
+            string? assigneeName = null;
+            if (expectedAssigneeId <= 0)
+            {
+                assigneeName = "Chưa nhận";
+            }
+            else if (HasAssignedName(cleanExpectedName))
+            {
+                assigneeName = cleanExpectedName;
+                _knownStaffNames[expectedAssigneeId] = cleanExpectedName!;
+            }
+            else if (identity?.UserId == expectedAssigneeId && HasAssignedName(identity.UserName))
+            {
+                assigneeName = identity.UserName;
+                _knownStaffNames[expectedAssigneeId] = identity.UserName!;
+            }
+            else if (_knownStaffNames.TryGetValue(expectedAssigneeId, out var cached) && HasAssignedName(cached))
+            {
+                assigneeName = cached;
+            }
+            else
+            {
+                lock (_active)
+                {
+                    var match = _active.Values.Concat(_closedCache.Values)
+                        .FirstOrDefault(t => t.AssigneeId == expectedAssigneeId && HasAssignedName(t.AssigneeName));
+                    if (match != null)
+                    {
+                        assigneeName = match.AssigneeName;
+                        _knownStaffNames[expectedAssigneeId] = assigneeName!;
+                    }
+                }
+            }
+
+            _recentAssignmentMutations[code] = (expectedAssigneeId, assigneeName, DateTimeOffset.UtcNow);
             if (newStatusHint is not null)
                 _recentStatusMutations[code] = (newStatusHint.Value, DateTimeOffset.UtcNow);
+
             TicketSnapshot? current;
             lock (_active) _active.TryGetValue(code, out current);
             if (current is null)
@@ -223,7 +271,17 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             }
 
             var effectiveStatus = newStatusHint ?? current.Status;
+            var isNewClaim = current.AssigneeId is null or 0;
+
             if (current.AssigneeId == expectedAssigneeId && current.Status == effectiveStatus) return;
+
+            // Nếu gán cho nhân viên (expectedAssigneeId > 0) nhưng chưa xác định được tên,
+            // TUYỆT ĐỐI KHÔNG gửi thông báo sớm với tên rỗng (sẽ hiển thị "Chưa nhận" gây hiểu lầm).
+            // Hãy để PollOnceAsync lấy snapshot đầy đủ từ FTMS API và gửi thông báo chuẩn.
+            if (expectedAssigneeId > 0 && !HasAssignedName(assigneeName))
+            {
+                return;
+            }
 
             var email = await TicketChangeDetector.ResolveLatestEmailWithDeadlineAsync(client, code,
                 cancellationToken, retryWhenMissing: false, current.LatestEmail);
@@ -231,7 +289,7 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             var updated = current with
             {
                 AssigneeId = expectedAssigneeId,
-                AssigneeName = expectedAssigneeName ?? actor ?? current.AssigneeName,
+                AssigneeName = assigneeName,
                 Status = effectiveStatus,
                 UpdatedAt = now,
                 IsTerminal = effectiveStatus.IsTerminal(settings.UnprocessedIsTerminal),
@@ -250,7 +308,9 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 Reason = "Người xử lý hoặc phòng ban đã thay đổi",
                 ChangedBy = actor,
                 ChangedAt = now,
+                PreviousAssigneeId = current.AssigneeId,
                 PreviousAssigneeName = current.AssigneeName,
+                PreviousDepartmentId = current.DepartmentId,
                 PreviousDepartmentName = current.DepartmentName,
                 LatestEmail = email ?? current.LatestEmail,
                 Snapshot = updated
@@ -258,6 +318,8 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             var message = FormatIfNotifiable(ticketEvent, current);
             await store.SaveSnapshotAndEventsAsync(updated, [(ticketEvent, message)], cancellationToken);
             UpdateTrackedSnapshot(updated);
+            if (isNewClaim)
+                _recentClaims[code] = DateTimeOffset.UtcNow;
             sender.Signal();
         }
         finally { _stateLock.Release(); }
@@ -305,7 +367,9 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         {
             lock (_active)
             {
-                return _active.TryGetValue(code, out var snapshot) && snapshot.AssigneeId == expectedAssigneeId;
+                return _active.TryGetValue(code, out var snapshot) &&
+                    snapshot.AssigneeId == expectedAssigneeId &&
+                    (expectedAssigneeId <= 0 || HasAssignedName(snapshot.AssigneeName));
             }
         }, cancellationToken);
 
@@ -335,6 +399,14 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
 
         var rawApiTickets = await client.GetTicketsAsync(includeHistory: historyDue, cancellationToken);
         var currentUser = await client.GetCurrentUserAsync(cancellationToken);
+        if (currentUser is not null && currentUser.UserId > 0 && !string.IsNullOrWhiteSpace(currentUser.UserName))
+            _knownStaffNames[currentUser.UserId] = currentUser.UserName;
+
+        foreach (var item in rawApiTickets)
+        {
+            if (item.AssigneeId is not null and not 0 && HasAssignedName(item.AssigneeName))
+                _knownStaffNames[item.AssigneeId.Value] = item.AssigneeName!;
+        }
 
         var now = DateTimeOffset.UtcNow;
         var apiTickets = new List<TicketSnapshot>(rawApiTickets.Count);
@@ -355,9 +427,24 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     }
                 }
                 var ticket = item;
+                if (currentUser is not null && ticket.AssigneeId == currentUser.UserId &&
+                    !HasAssignedName(ticket.AssigneeName))
+                {
+                    ticket = ticket with { AssigneeName = currentUser.UserName };
+                }
+                else if (ticket.AssigneeId is not null and not 0 && !HasAssignedName(ticket.AssigneeName) &&
+                    _knownStaffNames.TryGetValue(ticket.AssigneeId.Value, out var resolvedStaffName))
+                {
+                    ticket = ticket with { AssigneeName = resolvedStaffName };
+                }
+
                 if (_recentStatusMutations.TryGetValue(ticket.Code, out var statusMutation))
                 {
-                    if (now - statusMutation.Timestamp < TimeSpan.FromSeconds(15))
+                    if (ticket.Status == statusMutation.Status)
+                    {
+                        _recentStatusMutations.Remove(ticket.Code);
+                    }
+                    else if (now - statusMutation.Timestamp < TimeSpan.FromSeconds(60))
                     {
                         if (ticket.Status != statusMutation.Status)
                         {
@@ -375,14 +462,26 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 }
                 if (_recentAssignmentMutations.TryGetValue(ticket.Code, out var assignMutation))
                 {
-                    if (now - assignMutation.Timestamp < TimeSpan.FromSeconds(15))
+                    if (ticket.AssigneeId == assignMutation.AssigneeId)
                     {
-                        if (ticket.AssigneeId != assignMutation.AssigneeId)
+                        if (HasAssignedName(ticket.AssigneeName))
+                        {
+                            _knownStaffNames[ticket.AssigneeId.Value] = ticket.AssigneeName!;
+                            _recentAssignmentMutations.Remove(ticket.Code);
+                        }
+                    }
+                    else if (now - assignMutation.Timestamp < TimeSpan.FromSeconds(60))
+                    {
+                        var resolvedAssignee = assignMutation.AssigneeName;
+                        if (!HasAssignedName(resolvedAssignee) && _knownStaffNames.TryGetValue(assignMutation.AssigneeId, out var cachedAssignee))
+                            resolvedAssignee = cachedAssignee;
+
+                        if (HasAssignedName(resolvedAssignee))
                         {
                             ticket = ticket with
                             {
                                 AssigneeId = assignMutation.AssigneeId,
-                                AssigneeName = assignMutation.AssigneeName ?? ticket.AssigneeName
+                                AssigneeName = resolvedAssignee
                             };
                         }
                     }
@@ -550,7 +649,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     tickets.Add(closedSnapshot);
                 }
             }
-            else if (_missingMonitoredAttempts.TryGetValue(activeCode, out var attempts) && attempts > 3)
+            else if (_missingMonitoredAttempts.TryGetValue(activeCode, out var attempts) &&
+                     _active.TryGetValue(activeCode, out var existingTracked) &&
+                     existingTracked.Status != TicketStatus.Completed &&
+                     (attempts == 2 || (attempts > 2 && attempts % 15 == 0)))
             {
                 try
                 {
@@ -560,16 +662,22 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     // Chỉ tạo Closed khi có bằng chứng authoritative từ history API
                     if (history?.OccurredAt is not null)
                     {
+                        var resolvedStatus = history.Status != TicketStatus.New ? history.Status : TicketStatus.Closed;
+                        var isTerminal = resolvedStatus.IsTerminal(settings.UnprocessedIsTerminal);
                         var fallbackClosed = _active[activeCode] with
                         {
-                            Status = TicketStatus.Closed,
+                            Status = resolvedStatus,
                             UpdatedAt = history.OccurredAt,
-                            ClosedAt = history.OccurredAt,
+                            ClosedAt = resolvedStatus == TicketStatus.Closed ? history.OccurredAt : _active[activeCode].ClosedAt,
                             ClosedByName = history.Actor,
-                            IsTerminal = true
+                            IsTerminal = isTerminal
                         };
                         tickets.Add(fallbackClosed);
-                        _closedCache[activeCode] = fallbackClosed;
+                        if (isTerminal) _closedCache[activeCode] = fallbackClosed;
+                        if (resolvedStatus == TicketStatus.Completed)
+                        {
+                            _missingMonitoredAttempts[activeCode] = 0;
+                        }
                     }
                     // Nếu history trả null/không có OccurredAt → KHÔNG tạo synthetic Closed
                     // Ticket sẽ được giữ lại trong _active cho đến khi có xác nhận đóng thật
@@ -614,9 +722,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             personal.Count(x => x.Status == TicketStatus.Paused),
             personalClosedToday));
 
-        // 2. Persist state changes before optional email/SLA/reminder enrichment.
+        // 2. Enrich notification events, then persist state changes.
         Dictionary<string, TicketSnapshot> previousSnapshots;
         IReadOnlyList<TicketEvent> criticalEvents;
+        List<TicketEvent> criticalList;
         await _stateLock.WaitAsync(cancellationToken);
         try
         {
@@ -625,32 +734,113 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 previousSnapshots = new Dictionary<string, TicketSnapshot>(_active,
                     StringComparer.OrdinalIgnoreCase);
             }
-            var criticalList = detector.DetectCritical(previousSnapshots, tickets, settings).ToList();
-            for (var i = 0; i < criticalList.Count; i++)
+            for (var i = 0; i < tickets.Count; i++)
             {
-                var evt = criticalList[i];
-                var enriched = await TicketChangeDetector.ResolveLatestEmailWithDeadlineAsync(client, evt.TicketCode,
-                    cancellationToken, retryWhenMissing: false, evt.LatestEmail, evt.Snapshot.LatestEmail);
-                if (enriched is not null)
+                var ticket = tickets[i];
+                if (!previousSnapshots.TryGetValue(ticket.Code, out var previous)) continue;
+                var keepResponseReminder = ticket.Status == TicketStatus.InProgress;
+                tickets[i] = TicketChangeDetector.PreserveKnownValues(ticket, previous) with
                 {
-                    criticalList[i] = evt with
+                    ResponseReminderEmailId = keepResponseReminder
+                        ? ticket.ResponseReminderEmailId ?? previous.ResponseReminderEmailId
+                        : null,
+                    ResponseReminderSince = keepResponseReminder
+                        ? ticket.ResponseReminderSince ?? previous.ResponseReminderSince
+                        : null,
+                    ResponseReminderBucket = keepResponseReminder
+                        ? ticket.ResponseReminderBucket ?? previous.ResponseReminderBucket
+                        : null
+                };
+            }
+            criticalList = detector.DetectCritical(previousSnapshots, tickets, settings).ToList();
+            foreach (var claim in criticalList.Where(item => item.EventType == TicketEventType.AssignmentChanged &&
+                         item.PreviousAssigneeId is null or 0 && item.Snapshot.AssigneeId is not null and not 0))
+            {
+                _recentClaims[claim.TicketCode] = now;
+            }
+            criticalList.RemoveAll(item => item.EventType == TicketEventType.StatusChanged &&
+                item.CurrentStatus == TicketStatus.Paused &&
+                _recentClaims.TryGetValue(item.TicketCode, out var claimTime) &&
+                now - claimTime < ClaimStatusCoalescingWindow);
+            foreach (var expiredClaim in _recentClaims.Where(item => now - item.Value >= ClaimStatusCoalescingWindow)
+                         .Select(item => item.Key).ToList())
+            {
+                _recentClaims.Remove(expiredClaim);
+            }
+        }
+        finally { _stateLock.Release(); }
+
+        var resolveTasks = criticalList.Select(async evt =>
+        {
+            var isResponseTransition = evt.EventType == TicketEventType.StatusChanged &&
+                evt.PreviousStatus == TicketStatus.Paused &&
+                evt.CurrentStatus == TicketStatus.InProgress;
+            var shouldResolve = evt.EventType == TicketEventType.Created ||
+                isResponseTransition ||
+                evt.LatestEmail is not null ||
+                evt.Snapshot.LatestEmail is not null;
+            if (!shouldResolve)
+                return (Event: evt, IsResponseTransition: false, Enriched: (LatestEmail?)null);
+            try
+            {
+                var enriched = await TicketChangeDetector.ResolveLatestEmailForNotificationAsync(client, evt.TicketCode,
+                    cancellationToken, isResponseTransition, evt.LatestEmail, evt.Snapshot.LatestEmail);
+                return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: enriched);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch when (evt.EventType != TicketEventType.Created)
+            {
+                return (Event: evt, IsResponseTransition: isResponseTransition, Enriched: evt.LatestEmail ?? evt.Snapshot.LatestEmail);
+            }
+        }).ToList();
+
+        var resolvedResults = await Task.WhenAll(resolveTasks);
+
+        for (var i = 0; i < criticalList.Count; i++)
+        {
+            var (evt, isResponseTransition, enriched) = resolvedResults[i];
+            if (enriched is not null)
+            {
+                var previousEmail = previousSnapshots.GetValueOrDefault(evt.TicketCode)?.LatestEmail;
+                var isNewResponse = isResponseTransition && TicketChangeDetector.IsNewEmail(previousEmail, enriched);
+                criticalList[i] = evt with
+                {
+                    Reason = isNewResponse
+                        ? "Tự động mở lại do có phản hồi mới"
+                        : evt.Reason,
+                    LatestEmail = enriched,
+                    Snapshot = evt.Snapshot with
                     {
                         LatestEmail = enriched,
-                        Snapshot = evt.Snapshot with { LatestEmail = enriched }
-                    };
-                    var matchingTicketIdx = tickets.FindIndex(t => string.Equals(t.Code, evt.TicketCode, StringComparison.OrdinalIgnoreCase));
-                    if (matchingTicketIdx >= 0)
-                    {
-                        tickets[matchingTicketIdx] = tickets[matchingTicketIdx] with { LatestEmail = enriched };
+                        ResponseReminderEmailId = isNewResponse ? enriched.Id : evt.Snapshot.ResponseReminderEmailId,
+                        ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : evt.Snapshot.ResponseReminderSince
                     }
+                };
+                var matchingTicketIdx = tickets.FindIndex(t => string.Equals(t.Code, evt.TicketCode, StringComparison.OrdinalIgnoreCase));
+                if (matchingTicketIdx >= 0)
+                {
+                    tickets[matchingTicketIdx] = tickets[matchingTicketIdx] with
+                    {
+                        LatestEmail = enriched,
+                        ResponseReminderEmailId = isNewResponse ? enriched.Id : tickets[matchingTicketIdx].ResponseReminderEmailId,
+                        ResponseReminderSince = isNewResponse ? (enriched.SentAt ?? evt.DetectedAt) : tickets[matchingTicketIdx].ResponseReminderSince
+                    };
                 }
             }
+        }
+
+        await _stateLock.WaitAsync(cancellationToken);
+        try
+        {
             criticalEvents = criticalList;
             foreach (var group in criticalEvents.GroupBy(item => item.TicketCode,
                          StringComparer.OrdinalIgnoreCase))
             {
-                var snapshot = tickets.Last(item => string.Equals(item.Code, group.Key,
-                    StringComparison.OrdinalIgnoreCase));
+                var snapshot = tickets.LastOrDefault(item => string.Equals(item.Code, group.Key,
+                    StringComparison.OrdinalIgnoreCase)) ?? group.First().Snapshot;
                 var entries = group.Select(item =>
                     (item, FormatIfNotifiable(item,
                         previousSnapshots.GetValueOrDefault(item.TicketCode))))
@@ -658,16 +848,21 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                 await store.SaveSnapshotAndEventsAsync(snapshot, entries, cancellationToken);
                 UpdateTrackedSnapshot(snapshot);
             }
+            if (criticalEvents.Count > 0) sender.Signal();
+
             var criticalCodes = criticalEvents.Select(item => item.TicketCode)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var snapshot in tickets.Where(item => !criticalCodes.Contains(item.Code)))
+            var nonCritical = tickets.Where(item => !criticalCodes.Contains(item.Code)).ToList();
+            if (nonCritical.Count > 0)
             {
-                await store.SaveSnapshotAsync(snapshot, cancellationToken);
-                UpdateTrackedSnapshot(snapshot);
+                await store.SaveSnapshotsAsync(nonCritical, cancellationToken);
+                foreach (var snapshot in nonCritical)
+                {
+                    UpdateTrackedSnapshot(snapshot);
+                }
             }
         }
         finally { _stateLock.Release(); }
-        if (criticalEvents.Count > 0) sender.Signal();
 
         var events = await detector.DetectSupplementalAsync(previousSnapshots, tickets, client, settings, cancellationToken);
         var ihubBase = new Uri(settings.FtmsUrl).GetLeftPart(UriPartial.Authority) + "/ihub";
@@ -694,8 +889,15 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             else if (item.EventType == TicketEventType.ResponseReminder)
             {
                 var minuteMatch = System.Text.RegularExpressions.Regex.Match(item.Reason, @"(\d+) phút");
+                var emailId = !string.IsNullOrWhiteSpace(item.Snapshot.ResponseReminderEmailId)
+                    ? item.Snapshot.ResponseReminderEmailId
+                    : item.LatestEmail?.Id;
                 ledgerType = "ResponseReminder";
-                ledgerDisc = minuteMatch.Success ? $"response-{int.Parse(minuteMatch.Groups[1].Value) / 5}" : "";
+                ledgerDisc = minuteMatch.Success
+                    ? (!string.IsNullOrWhiteSpace(emailId)
+                        ? $"response-{emailId}-{int.Parse(minuteMatch.Groups[1].Value) / 5}"
+                        : $"response-{int.Parse(minuteMatch.Groups[1].Value) / 5}")
+                    : "";
                 if (await store.HasNotificationAsync(item.TicketCode, ledgerType, ledgerDisc, cancellationToken))
                     continue;
             }
@@ -736,6 +938,12 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     x.EventType == TicketEventType.EmailReceived &&
                     currentTracked.Status == TicketStatus.InProgress);
                 var keepResponseReminder = currentTracked.Status == TicketStatus.InProgress;
+                var unassignedReminderEvent = events.LastOrDefault(x =>
+                    string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase) &&
+                    x.EventType == TicketEventType.UnassignedReminder);
+                var responseReminderEvent = events.LastOrDefault(x =>
+                    string.Equals(x.TicketCode, item.Code, StringComparison.OrdinalIgnoreCase) &&
+                    x.EventType == TicketEventType.ResponseReminder);
                 var snapshot = currentTracked with
                 {
                     LatestEmail = eventEmail ??
@@ -746,6 +954,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
                     ResponseReminderSince = keepResponseReminder
                         ? responseEvent?.LatestEmail?.SentAt ?? responseEvent?.DetectedAt ??
                           currentTracked.ResponseReminderSince
+                        : null,
+                    UnassignedReminderBucket = unassignedReminderEvent?.Snapshot.UnassignedReminderBucket ?? currentTracked.UnassignedReminderBucket,
+                    ResponseReminderBucket = keepResponseReminder
+                        ? responseReminderEvent?.Snapshot.ResponseReminderBucket ?? currentTracked.ResponseReminderBucket
                         : null,
                     IsTerminal = currentTracked.Status.IsTerminal(settings.UnprocessedIsTerminal)
                 };
@@ -787,6 +999,10 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
         }
     }
 
+    private static bool HasAssignedName(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && value.Trim() != "---" &&
+        !value.Trim().Equals("Chưa nhận", StringComparison.OrdinalIgnoreCase);
+
     private static string? NormalizeUserName(string? value)
     {
         var normalized = value?.Trim();
@@ -795,5 +1011,4 @@ public sealed class TicketMonitor(IFtmsClient client, ITicketStore store, INotif
             : normalized.ToUpperInvariant();
     }
 
-    private static DashboardSummary UnavailableSummary() => new(0, 0, 0, 0, 0, 0, 0, 0, 0);
 }

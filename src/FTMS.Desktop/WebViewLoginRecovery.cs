@@ -30,6 +30,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
     private int _generation;
     private bool _loginMethodClicked;
     private bool _waitingForUser;
+    private DateTimeOffset _waitingForUserUntil = DateTimeOffset.MinValue;
     private DateTimeOffset _nextNavigationAllowedAt = DateTimeOffset.MinValue;
 
     public event Action<LoginRecoveryStatus>? StatusChanged;
@@ -38,14 +39,21 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
 
     public async Task BeginAsync(CancellationToken cancellationToken)
     {
-        if (_waitingForUser || !await _recoveryLock.WaitAsync(0, cancellationToken)) return;
+        if (_waitingForUser)
+        {
+            if (DateTimeOffset.UtcNow < _waitingForUserUntil) return;
+            _waitingForUser = false;
+            _loginMethodClicked = false;
+        }
+
+        if (!await _recoveryLock.WaitAsync(0, cancellationToken)) return;
         try
         {
             var generation = _generation;
             var currentUri = await GetCurrentUriAsync(cancellationToken);
             if (currentUri is null || generation != _generation) return;
 
-            if (IsLoginUri(currentUri))
+            if (IsLoginUri(currentUri) || await IsLoginDocumentAsync(cancellationToken))
             {
                 await SelectFptCorporationAsync(generation, cancellationToken);
                 return;
@@ -70,6 +78,7 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
         _generation++;
         _loginMethodClicked = false;
         _waitingForUser = false;
+        _waitingForUserUntil = DateTimeOffset.MinValue;
         State = LoginRecoveryState.Idle;
     }
 
@@ -88,7 +97,9 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
             if (generation != _generation) return;
 
             var currentUri = await GetCurrentUriAsync(cancellationToken);
-            if (currentUri is null || !IsLoginUri(currentUri)) return;
+            if (currentUri is null ||
+                (!IsLoginUri(currentUri) &&
+                 !await IsLoginDocumentAsync(cancellationToken))) return;
 
             var result = await ExecuteScriptAsync(LoginMethodScript, cancellationToken);
             if (generation != _generation) return;
@@ -119,24 +130,29 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
             if (generation != _generation) return;
 
             var currentUri = await GetCurrentUriAsync(cancellationToken);
-            if (currentUri is null || IsFtmsIhubUri(currentUri)) return;
+            if (currentUri is null) return;
+            if (IsFtmsIhubUri(currentUri) &&
+                !await IsLoginDocumentAsync(cancellationToken)) return;
         }
 
         if (generation == _generation)
             EnterWaitingForUser("SSO/ADFS cần bạn hoàn tất đăng nhập hoặc MFA trong cửa sổ FTMS.");
     }
 
+    private static readonly Uri LoginUri = new("https://ftms.fpt.net/ihub/adfs/LoginCAS?ReturnUrl=%2Fihub%2Freact%2Flist%3Freferrer%3Dmenu");
+
     private async Task NavigateToTargetAsync(CancellationToken cancellationToken)
     {
         if (DateTimeOffset.UtcNow < _nextNavigationAllowedAt) return;
         _nextNavigationAllowedAt = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(12);
         Publish(LoginRecoveryState.Navigating, "Phiên FTMS đã hết hạn, đang mở lại trang đăng nhập");
-        await webView.Dispatcher.InvokeAsync(() => webView.Source = targetUri).Task.WaitAsync(cancellationToken);
+        await webView.Dispatcher.InvokeAsync(() => webView.Source = LoginUri).Task.WaitAsync(cancellationToken);
     }
 
     private void EnterWaitingForUser(string message)
     {
         _waitingForUser = true;
+        _waitingForUserUntil = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(3);
         Publish(LoginRecoveryState.WaitingForUser, message, true);
     }
 
@@ -148,6 +164,9 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
 
     private async Task<Uri?> GetCurrentUriAsync(CancellationToken cancellationToken) =>
         await webView.Dispatcher.InvokeAsync(() => webView.Source).Task.WaitAsync(cancellationToken);
+
+    internal async Task<bool> IsLoginDocumentAsync(CancellationToken cancellationToken) =>
+        string.Equals(await ExecuteScriptAsync(LoginDocumentScript, cancellationToken), "login", StringComparison.Ordinal);
 
     private async Task<string> ExecuteScriptAsync(string script, CancellationToken cancellationToken)
     {
@@ -173,8 +192,18 @@ internal sealed class WebViewLoginRecovery(WebView2 webView, Uri targetUri)
     public static bool IsFtmsIhubUri(Uri uri) => IsFtmsHost(uri) &&
         uri.AbsolutePath.StartsWith("/ihub/", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsFtmsHost(Uri uri) =>
+    internal static bool IsFtmsHost(Uri uri) =>
         string.Equals(uri.Host, "ftms.fpt.net", StringComparison.OrdinalIgnoreCase);
+
+    private const string LoginDocumentScript = """
+        (() => {
+          const title = String(document.title || '');
+          const hasLoginMethod = Boolean(document.querySelector('.bg-btn.login-method'));
+          return hasLoginMethod || /đăng nhập\s*-\s*FTI Management System/i.test(title)
+            ? 'login'
+            : 'other';
+        })()
+        """;
 
     internal const string LoginMethodScript = """
         (() => {
