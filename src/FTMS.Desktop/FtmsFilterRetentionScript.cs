@@ -14,8 +14,13 @@ internal static class FtmsFilterRetentionScript
             .trim();
 
           let manualOverride = false;
-          let myTicketState = false;
-          let isAutomatedOpening = false;
+          try {
+            manualOverride = sessionStorage.getItem('ftms_companion_manual_override') === 'true';
+          } catch { }
+
+          let myTicketActive = false;
+
+          const shouldRetainStatus = () => !manualOverride && !myTicketActive;
 
           const isMyTicketActive = btn => {
             if (!btn) return false;
@@ -95,7 +100,7 @@ internal static class FtmsFilterRetentionScript
           };
 
           const updateStatusButtonLabel = () => {
-            if (manualOverride || myTicketState) return;
+            if (!shouldRetainStatus()) return;
 
             const elements = Array.from(document.querySelectorAll('button, [role="button"], a, .btn, .ant-select, [class*="select"]'))
               .filter(el => !el.closest('header, nav, .main-header, .navbar, #header, .header'));
@@ -143,218 +148,122 @@ internal static class FtmsFilterRetentionScript
             }
           };
 
-          const getStatusType = el => {
-            if (!el || el.children.length > 3) return null;
-            const raw = norm(el.innerText || '');
-            if (!raw) return null;
-            const text = raw.replace(/^[•\s\-_*]+/, '').trim();
+          const syncStatusDropdownUi = () => {
+            if (!shouldRetainStatus()) return;
 
-            if (text === 'moi' || text.startsWith('moi (') || text.startsWith('moi(')) return 'moi';
-            if (text === 'phan cong' || text.startsWith('phan cong (') || text.startsWith('phan cong(')) return 'phan cong';
+            const containers = document.querySelectorAll('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, .ant-dropdown, div[class*="dropdown"], div[class*="popover"]');
+            for (const container of containers) {
+              const text = norm(container.innerText);
+              if (text.includes('tat ca') && text.includes('moi') && text.includes('phan cong')) {
+                const items = Array.from(container.querySelectorAll('li, label, div, [role="option"], tr'));
+                for (const item of items) {
+                  const itemText = norm(item.innerText);
+                  const checkbox = item.querySelector('input[type="checkbox"], [role="checkbox"]') ||
+                                    (item.getAttribute('role') === 'checkbox' ? item : null);
 
-            if (text === 'tam ngung' || text === 'dang thuc hien' || text === 'hoan thanh' ||
-                text === 'da dong' || text === 'dong' || text === 'da huy' || text === 'huy' ||
-                text === 'chua xu ly' || text === 'khong xu ly') {
-              return 'other';
-            }
-            return null;
-          };
+                  const isTatCa = itemText.startsWith('tat ca');
+                  const isMoi = itemText.startsWith('moi') || (itemText.includes('moi') && !itemText.includes('lam moi'));
+                  const isPhanCong = itemText.startsWith('phan cong') || itemText.includes('phan cong');
 
-          const findTicketContainer = tagEl => {
-            let curr = tagEl.parentElement;
-            let candidate = null;
-            while (curr && curr !== document.body && !curr.closest('header, nav, .ant-dropdown, .dropdown-menu')) {
-              if (curr.tagName === 'TR' || curr.classList.contains('ant-list-item') || curr.classList.contains('ant-card') || curr.getAttribute('role') === 'row') {
-                return curr;
-              }
-              const text = curr.innerText || '';
-              const codes = text.match(/(?:RQ|CA|IN)\d{8,}/g) || [];
-              if (codes.length === 1) {
-                candidate = curr;
-              } else if (codes.length > 1) {
-                if (candidate) return candidate;
-              }
-              curr = curr.parentElement;
-            }
-            return candidate || tagEl.closest('tr, [class*="card"], div[class*="item"], div[class*="rounded"]');
-          };
-
-          // Filter DOM ticket list to strictly display only tickets in Mới and Phân công statuses
-          const filterDomTicketRows = () => {
-            if (manualOverride || myTicketState) {
-              const hidden = document.querySelectorAll('[data-ftms-status-hidden="true"]');
-              for (const el of hidden) {
-                el.style.display = '';
-                delete el.dataset.ftmsStatusHidden;
-              }
-              return;
-            }
-
-            const tags = document.querySelectorAll('.ant-tag, [class*="tag"], [class*="badge"], span[class*="rounded"], div[class*="rounded"]');
-            for (const tag of tags) {
-              if (tag.closest('header, nav, .ant-dropdown, .dropdown-menu, .ant-select-dropdown')) continue;
-
-              const statusType = getStatusType(tag);
-              if (!statusType) continue;
-
-              const container = findTicketContainer(tag);
-              if (!container || container === document.body) continue;
-
-              if (statusType === 'other') {
-                container.style.display = 'none';
-                container.dataset.ftmsStatusHidden = 'true';
-              } else if (statusType === 'moi' || statusType === 'phan cong') {
-                if (container.dataset.ftmsStatusHidden === 'true') {
-                  container.style.display = '';
-                  delete container.dataset.ftmsStatusHidden;
+                  const shouldBeChecked = isMoi || isPhanCong;
+                  if (checkbox) {
+                    if (checkbox.checked !== undefined) checkbox.checked = shouldBeChecked;
+                    checkbox.setAttribute('aria-checked', shouldBeChecked ? 'true' : 'false');
+                    if (shouldBeChecked) {
+                      checkbox.classList.add('checked', 'ant-checkbox-checked');
+                      item.classList.add('active', 'selected', 'ant-select-item-option-selected');
+                    } else {
+                      checkbox.classList.remove('checked', 'ant-checkbox-checked');
+                      item.classList.remove('active', 'selected', 'ant-select-item-option-selected');
+                    }
+                  }
                 }
               }
             }
-
-            // Update pager info if visible items count differs
-            const pagers = document.querySelectorAll('.ant-pagination-total-text, .k-pager-info, [class*="pagination"]');
-            for (const pager of pagers) {
-              const text = pager.innerText || '';
-              const match = /(\d+)-(\d+)\s+của\s+(\d+)\s+mục/i.exec(text);
-              if (match) {
-                const hiddenCount = document.querySelectorAll('[data-ftms-status-hidden="true"]').length;
-                if (hiddenCount > 0) {
-                  const total = parseInt(match[3], 10);
-                  const visible = Math.max(1, total - hiddenCount);
-                  pager.innerText = `1-${visible} của ${visible} mục (2 trạng thái)`;
-                }
-              }
-            }
+            updateStatusButtonLabel();
           };
 
-          const isItemChecked = el => {
-            if (!el) return false;
-            if (el.querySelector('.ant-checkbox-checked, [aria-checked="true"]')) return true;
-            if (el.classList.contains('ant-checkbox-checked') || el.classList.contains('selected') || el.classList.contains('active')) return true;
-            if (el.classList.contains('ant-select-item-option-selected')) return true;
-            const cb = el.querySelector('input[type="checkbox"]');
-            if (cb && cb.checked) return true;
+          const isPaginatedListBody = body => {
+            if (!body) return false;
+            try {
+              if (typeof body === 'string') {
+                const hasPagination = /(?:^|[&"'])pageSize[=&"']|(?:^|[&"'])take[=&"']|(?:^|[&"'])page[=&"']/i.test(body);
+                if (!hasPagination) return false;
+
+                if (/(?:^|[&])alarmType=(?!0\b)[^&]*/i.test(body)) return false;
+                if (/(?:^|[&])isAlarm=true/i.test(body)) return false;
+
+                if (/(?:^|[&"'])isMyTicket[=&"'](?::\s*true|="?true"?)/i.test(body)) return false;
+
+                return true;
+              }
+              if (body instanceof URLSearchParams) {
+                if (body.get('isMyTicket') === 'true') return false;
+                const at = body.get('alarmType');
+                if (at && at !== '0') return false;
+                if (body.get('isAlarm') === 'true') return false;
+                return body.has('pageSize') || body.has('take') || body.has('page');
+              }
+            } catch { }
             return false;
           };
 
-          const clickDropdownItem = el => {
-            if (!el) return;
-            const clickable = el.querySelector('label.ant-checkbox-wrapper, .ant-checkbox-wrapper, .ant-checkbox, input[type="checkbox"]') || el;
-            clickable.click();
+          const isTicketListRequest = (url, body) => {
+            const u = String(url || '');
+            let pathname = u;
+            try {
+              pathname = new URL(u, window.location.origin).pathname;
+            } catch { }
+
+            if (!/^\/ihub\/(?:request|cases)\/getlist(?:request|cases)(?:v\d+)?(?:\?|$)/i.test(pathname)) {
+              return false;
+            }
+            if (/(?:count|stat|detail|alarm|export|chart)/i.test(pathname)) {
+              return false;
+            }
+
+            return isPaginatedListBody(body);
           };
 
-          const applyStatusSelectionToContainer = container => {
-            if (!container) return;
-            const items = Array.from(container.querySelectorAll('li, label, div, [role="option"], tr'));
-
-            let tatCaItem = null;
-            let moiItem = null;
-            let phanCongItem = null;
-            const otherItems = [];
-
-            for (const item of items) {
-              const itemText = norm(item.innerText);
-              if (itemText.startsWith('tat ca')) {
-                tatCaItem = item;
-              } else if (itemText.startsWith('moi') || (itemText.includes('moi') && !itemText.includes('lam moi'))) {
-                moiItem = item;
-              } else if (itemText.startsWith('phan cong') || itemText.includes('phan cong')) {
-                phanCongItem = item;
-              } else if (itemText.includes('dang thuc hien') || itemText.includes('hoan thanh') ||
-                         itemText.includes('tam ngung') || itemText.includes('dong') || itemText.includes('huy')) {
-                otherItems.push(item);
+          const modifyStatusInPayload = body => {
+            if (!body) return body;
+            try {
+              if (typeof body === 'string') {
+                if (body.trim().startsWith('{')) {
+                  const json = JSON.parse(body);
+                  if ('strStatus' in json) {
+                    json.strStatus = '0,1';
+                    return JSON.stringify(json);
+                  }
+                } else if (body.includes('strStatus=')) {
+                  return body.replace(/(^|&)strStatus=[^&]*/, '$1strStatus=0%2C1');
+                } else {
+                  return body + (body.length > 0 ? '&' : '') + 'strStatus=0%2C1';
+                }
+              } else if (body instanceof URLSearchParams) {
+                body.set('strStatus', '0,1');
+                return body;
+              } else if (typeof FormData !== 'undefined' && body instanceof FormData) {
+                body.set('strStatus', '0,1');
+                return body;
               }
-            }
-
-            // 1. If Tất cả is checked -> click to uncheck
-            if (tatCaItem && isItemChecked(tatCaItem)) {
-              clickDropdownItem(tatCaItem);
-            }
-
-            // 2. If Mới is NOT checked -> click to check
-            if (moiItem && !isItemChecked(moiItem)) {
-              clickDropdownItem(moiItem);
-            }
-
-            // 3. If Phân công is NOT checked -> click to check
-            if (phanCongItem && !isItemChecked(phanCongItem)) {
-              clickDropdownItem(phanCongItem);
-            }
-
-            // 4. If any other status is checked -> click to uncheck
-            for (const other of otherItems) {
-              if (isItemChecked(other)) {
-                clickDropdownItem(other);
-              }
-            }
+            } catch { }
+            return body;
           };
 
-          const runStatusSelectionWorkflow = () => {
-            if (manualOverride || myTicketState) return;
-
-            const containers = Array.from(document.querySelectorAll('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, .ant-dropdown, div[class*="dropdown"], div[class*="popover"]'))
-              .filter(c => {
-                const text = norm(c.innerText);
-                return text.includes('tat ca') && text.includes('moi') && text.includes('phan cong');
-              });
-
-            if (containers.length > 0) {
-              applyStatusSelectionToContainer(containers[0]);
-              updateStatusButtonLabel();
-              filterDomTicketRows();
-              return;
-            }
-
-            const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a, .btn'));
-            const statusBtn = allBtns.find(isStatusToggleButton);
-            if (!statusBtn) {
-              updateStatusButtonLabel();
-              filterDomTicketRows();
-              return;
-            }
-
-            isAutomatedOpening = true;
-            statusBtn.click();
-
-            setTimeout(() => {
-              const openedContainers = Array.from(document.querySelectorAll('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, .ant-dropdown, div[class*="dropdown"], div[class*="popover"]'))
-                .filter(c => {
-                  const text = norm(c.innerText);
-                  return text.includes('tat ca') && text.includes('moi') && text.includes('phan cong');
-                });
-
-              if (openedContainers.length > 0) {
-                applyStatusSelectionToContainer(openedContainers[0]);
-              }
-
-              setTimeout(() => {
-                statusBtn.click();
-                isAutomatedOpening = false;
-                updateStatusButtonLabel();
-                filterDomTicketRows();
-
-                setTimeout(triggerReload, 150);
-              }, 100);
-            }, 120);
-          };
-
-          // Trigger standard reload on FTMS page without modifying network payloads
           const triggerReload = () => {
-            // 1. React search button on /ihub/react/list
             const listSearchBtn = document.querySelector('button.absolute.right-1, input[placeholder*="Tìm kiếm" i] ~ button, input[placeholder*="Tìm kiếm" i] + button');
             if (listSearchBtn && listSearchBtn.offsetParent !== null) {
               listSearchBtn.click();
               return;
             }
 
-            // 2. Kendo Grid refresh on /ihub/list
             const kendoRefresh = document.querySelector('a.k-pager-refresh.k-link');
             if (kendoRefresh && kendoRefresh.offsetParent !== null) {
               kendoRefresh.click();
               return;
             }
 
-            // 3. Kendo DataSource read
             try {
               const kendoGrid = globalThis.jQuery?.('#list-grid').data('kendoGrid');
               if (kendoGrid?.dataSource && typeof kendoGrid.dataSource.read === 'function') {
@@ -363,7 +272,6 @@ internal static class FtmsFilterRetentionScript
               }
             } catch { }
 
-            // 4. Any "Làm mới" button in toolbar
             const reloadBtn = Array.from(document.querySelectorAll('button, [role="button"], a, .btn'))
               .find(b => {
                 const text = norm(b.innerText || b.getAttribute('title') || '');
@@ -382,16 +290,15 @@ internal static class FtmsFilterRetentionScript
 
               setTimeout(() => {
                 const isNowActive = isMyTicketActive(btn);
-                const wasTurnedOff = (wasActive && !isNowActive) || (!isNowActive && myTicketState);
-                myTicketState = isNowActive;
+                const wasTurnedOff = (wasActive && !isNowActive) || (!isNowActive && myTicketActive);
+                myTicketActive = isNowActive;
 
                 if (wasTurnedOff) {
                   manualOverride = false;
-                  filterDomTicketRows();
+                  try { sessionStorage.removeItem('ftms_companion_manual_override'); } catch { }
                   updateStatusButtonLabel();
-                  setTimeout(runStatusSelectionWorkflow, 150);
+                  setTimeout(triggerReload, 150);
                 } else {
-                  filterDomTicketRows();
                   updateStatusButtonLabel();
                 }
               }, 100);
@@ -399,90 +306,81 @@ internal static class FtmsFilterRetentionScript
             }
 
             if (isStatusToggleButton(e.target)) {
-              if (!manualOverride && !isAutomatedOpening) {
-                setTimeout(() => {
-                  const containers = Array.from(document.querySelectorAll('.dropdown-menu, [role="listbox"], [role="menu"], .ant-select-dropdown, .ant-dropdown, div[class*="dropdown"], div[class*="popover"]'))
-                    .filter(c => {
-                      const text = norm(c.innerText);
-                      return text.includes('tat ca') && text.includes('moi') && text.includes('phan cong');
-                    });
-                  if (containers.length > 0) {
-                    applyStatusSelectionToContainer(containers[0]);
-                  }
-                }, 80);
+              if (shouldRetainStatus()) {
+                setTimeout(syncStatusDropdownUi, 50);
+                setTimeout(syncStatusDropdownUi, 150);
               }
               return;
             }
 
             // User explicitly clicking dropdown items
-            if (e.isTrusted && isStatusDropdownElement(e.target) && !isAutomatedOpening) {
+            if (e.isTrusted && isStatusDropdownElement(e.target)) {
               const targetText = norm(e.target.innerText || e.target.closest('li, label, div, [role="option"]')?.innerText || '');
               const isOtherStatus = targetText.includes('dang thuc hien') || targetText.includes('hoan thanh') ||
                                     targetText.includes('tam ngung') || targetText.includes('dong') || targetText.includes('huy') ||
                                     targetText.startsWith('tat ca');
               if (isOtherStatus) {
                 manualOverride = true;
-                filterDomTicketRows();
+                try { sessionStorage.setItem('ftms_companion_manual_override', 'true'); } catch { }
               }
             }
           }, true);
 
-          // Wrap fetch (observability only, NEVER touches body or headers)
+          // Wrap fetch
           const origFetch = window.fetch;
           if (typeof origFetch === 'function') {
-            window.fetch = function() {
+            window.fetch = function(input, init) {
+              try {
+                const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || '');
+                const body = init?.body;
+                if (shouldRetainStatus() && isTicketListRequest(url, body)) {
+                  if (init && init.body) {
+                    init.body = modifyStatusInPayload(init.body);
+                  }
+                }
+              } catch { }
+
               const promise = origFetch.apply(this, arguments);
               if (promise && typeof promise.then === 'function') {
                 promise.then(() => {
-                  if (!manualOverride) {
-                    setTimeout(() => {
-                      updateStatusButtonLabel();
-                      filterDomTicketRows();
-                    }, 200);
-                    setTimeout(() => {
-                      updateStatusButtonLabel();
-                      filterDomTicketRows();
-                    }, 600);
-                  }
+                  if (shouldRetainStatus()) setTimeout(updateStatusButtonLabel, 200);
                 }).catch(() => {});
               }
               return promise;
             };
           }
 
-          // Wrap XMLHttpRequest (observability only, NEVER touches body or headers)
+          // Wrap XMLHttpRequest
           const OrigXHR = window.XMLHttpRequest;
           if (typeof OrigXHR === 'function') {
+            const origOpen = OrigXHR.prototype.open;
             const origSend = OrigXHR.prototype.send;
-            OrigXHR.prototype.send = function() {
-              this.addEventListener('loadend', () => {
-                if (!manualOverride) {
-                  setTimeout(() => {
-                    updateStatusButtonLabel();
-                    filterDomTicketRows();
-                  }, 200);
-                  setTimeout(() => {
-                    updateStatusButtonLabel();
-                    filterDomTicketRows();
-                  }, 600);
+
+            OrigXHR.prototype.open = function(method, url) {
+              try {
+                this.__filterUrl = String(url || '');
+              } catch { }
+              return origOpen.apply(this, arguments);
+            };
+
+            OrigXHR.prototype.send = function(body) {
+              try {
+                if (this.__filterUrl && shouldRetainStatus() && isTicketListRequest(this.__filterUrl, body)) {
+                  body = modifyStatusInPayload(body);
                 }
+              } catch { }
+
+              this.addEventListener('loadend', () => {
+                if (shouldRetainStatus()) setTimeout(updateStatusButtonLabel, 200);
               }, { once: true });
-              return origSend.apply(this, arguments);
+
+              return origSend.call(this, body);
             };
           }
 
-          // Periodic background sync to guarantee DOM consistency
-          setInterval(() => {
-            if (!manualOverride && !myTicketState) {
-              updateStatusButtonLabel();
-              filterDomTicketRows();
-            }
-          }, 1200);
-
-          // Initial setup on load
-          setTimeout(runStatusSelectionWorkflow, 600);
-          setTimeout(updateStatusButtonLabel, 1000);
-          setTimeout(filterDomTicketRows, 1000);
+          // Initial label update on load
+          setTimeout(updateStatusButtonLabel, 500);
+          setTimeout(updateStatusButtonLabel, 1500);
         })();
         """;
 }
