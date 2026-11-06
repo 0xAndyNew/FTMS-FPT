@@ -300,7 +300,6 @@ public partial class CompactWindow : Window
         };
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsUserActivityScript.Value);
         await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsStatusMutationScript.Value);
-        await FtmsWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(FtmsFilterRetentionScript.Value);
         _displayLoginRecovery = new WebViewLoginRecovery(FtmsWebView, new Uri(FtmsReactUrl));
         _displayLoginRecovery.StatusChanged += OnLoginRecoveryStatusChanged;
         _ftmsClient = new WebViewFtmsClient(MonitorWebView, FtmsLegacyUrl);
