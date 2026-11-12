@@ -783,6 +783,12 @@ public partial class CompactWindow : Window
         }
         finally { _settingsOpen = false; MarkUserActivity(); }
     }
+
+    private void OpenAbout(object sender, RoutedEventArgs e)
+    {
+        MarkUserActivity();
+        new AboutWindow { Owner = this }.ShowDialog();
+    }
     private void ScheduleVisibleNavigationRetry(CoreWebView2WebErrorStatus errorStatus)
     {
         _visibleRetryAttempts++;

@@ -21,6 +21,12 @@ public partial class CompactSettingsWindow : Window
         StartupCheck.IsChecked = store.Current.StartWithWindows;
         AutoRefreshCheck.IsChecked = store.Current.AutoRefreshEnabled;
         RefreshSecondsBox.Text = store.Current.AutoRefreshSeconds.ToString();
+
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        if (version is not null)
+        {
+            AboutVersionLabel.Text = $" v{version.Major}.{version.Minor}.{version.Build}";
+        }
     }
 
     private void Save(object sender, RoutedEventArgs e)
@@ -103,6 +109,11 @@ public partial class CompactSettingsWindow : Window
                 : "Telegram kh\u00f4ng cung c\u1ea5p chi ti\u1ebft";
         }
         catch (JsonException) { return "Ph\u1ea3n h\u1ed3i Telegram kh\u00f4ng h\u1ee3p l\u1ec7"; }
+    }
+
+    private void OpenAbout(object sender, RoutedEventArgs e)
+    {
+        new AboutWindow { Owner = this }.ShowDialog();
     }
 
     private void Cancel(object sender, RoutedEventArgs e) => DialogResult = false;

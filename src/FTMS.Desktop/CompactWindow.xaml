@@ -17,6 +17,7 @@
                     <Button Style="{StaticResource IconButton}" ToolTip="Trang chính (Danh sách hỗ trợ)" Click="OpenFtms"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE80F;" FontSize="16" Foreground="#1D1D1F"/></Button>
                     <Button Style="{StaticResource IconButton}" ToolTip="Làm mới trang hiện tại (F5)" Click="ReloadFtms"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE72C;" FontSize="16" Foreground="#1D1D1F"/></Button>
                     <Button Style="{StaticResource IconButton}" ToolTip="Cài đặt" Click="OpenSettings"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE713;" FontSize="16" Foreground="#1D1D1F"/></Button>
+                    <Button Style="{StaticResource IconButton}" ToolTip="Thông tin ứng dụng (About)" Click="OpenAbout"><TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE946;" FontSize="16" Foreground="#1D1D1F"/></Button>
                     <Border Margin="8,0,0,0" Padding="10,6" Background="#EEF4F0" CornerRadius="6"><StackPanel Orientation="Horizontal"><Ellipse x:Name="StatusDot" Width="7" Height="7" Fill="#D9A441" Margin="0,0,7,0"/><TextBlock x:Name="SessionText" Text="Đang kết nối" FontSize="11" Foreground="#53605B"/></StackPanel></Border>
                 </StackPanel>
                 <Border x:Name="DashboardCard" Grid.Column="2" Width="660" Height="64" Padding="10,5" Background="#FFFFFF" BorderBrush="#E5E5EA" BorderThickness="1" CornerRadius="9" VerticalAlignment="Center"

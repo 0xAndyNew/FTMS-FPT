@@ -1,7 +1,7 @@
 <Window x:Class="FTMS.Desktop.CompactSettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="C&#224;i &#273;&#7863;t" Width="480" Height="680" ResizeMode="NoResize"
+        Title="C&#224;i &#273;&#7863;t" Width="480" Height="730" ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner" Background="#F5F5F7" FontFamily="Segoe UI Variable Display">
     <Window.Resources>
         <Style x:Key="FieldLabel" TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="#3A3A3C"/></Style>
@@ -34,6 +34,27 @@
                 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="92"/></Grid.ColumnDefinitions>
                     <StackPanel><TextBlock Text="T&#7921; &#273;&#7897;ng l&#224;m m&#7899;i" FontSize="14" FontWeight="SemiBold" Foreground="#1D1D1F"/><CheckBox x:Name="AutoRefreshCheck" Content="B&#7853;t l&#224;m m&#7899;i danh s&#225;ch FTMS" Margin="0,9,0,0" FontSize="12" Foreground="#454549"/><CheckBox x:Name="StartupCheck" Content="Kh&#7903;i &#273;&#7897;ng c&#249;ng Windows" Margin="0,9,0,0" FontSize="12" Foreground="#454549"/></StackPanel>
                     <StackPanel Grid.Column="1"><TextBlock Text="Chu k&#7923; (gi&#226;y)" Style="{StaticResource FieldLabel}"/><TextBox x:Name="RefreshSecondsBox" Style="{StaticResource InputBox}" Margin="0,7,0,0" TextAlignment="Center"/></StackPanel>
+                </Grid>
+            </Border>
+            <Border Margin="0,12,0,0" Padding="14,12" Background="#FFFFFF" BorderBrush="#E2E2E7" BorderThickness="1" CornerRadius="10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="FTMS Companion" FontSize="13" FontWeight="SemiBold" Foreground="#1D1D1F"/>
+                            <TextBlock x:Name="AboutVersionLabel" Text=" v1.0.67" FontSize="12" Foreground="#6E6E73"/>
+                        </StackPanel>
+                        <TextBlock Text="FPT Telecom International • Phòng TOC Data Center" FontSize="11" Foreground="#85858A" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Button Grid.Column="1" Style="{StaticResource SecondaryButton}" Click="OpenAbout" Height="30" Padding="10,0">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock FontFamily="Segoe Fluent Icons" Text="&#xE946;" FontSize="13" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Thông tin" FontSize="11" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
                 </Grid>
             </Border>
             <TextBlock Margin="4,12,4,0" TextWrapping="Wrap" FontSize="11" Foreground="#77777C" Text="API th&#7901;i gian th&#7921;c v&#7851;n ho&#7841;t &#273;&#7897;ng li&#234;n t&#7909;c. T&#7921; &#273;&#7897;ng l&#224;m m&#7899;i ch&#7881; b&#7845;m n&#250;t T&#7843;i l&#7841;i c&#7911;a danh s&#225;ch FTMS, kh&#244;ng t&#7843;i l&#7841;i to&#224;n trang."/>

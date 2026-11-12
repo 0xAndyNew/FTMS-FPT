@@ -21,9 +21,15 @@
     <ApplicationIcon>..\..\picture\ftms-app.ico</ApplicationIcon>
     <AssemblyName>FTMS.Companion</AssemblyName>
     <Product>FTMS Companion</Product>
-    <Company>FPT</Company>
-    <Description>Ứng dụng theo dõi ticket FTMS và gửi thông báo Telegram.</Description>
+    <Company>FPT Telecom International</Company>
+    <Authors>FPT Telecom International - TOC Data Center</Authors>
+    <Description>Ứng dụng giám sát ticket FTMS theo thời gian thực và tích hợp Telegram cho kỹ thuật viên phòng TOC Data Center (FTI).</Description>
+    <Copyright>Copyright © 2026 FPT Telecom International. All rights reserved.</Copyright>
     <Version>1.0.67</Version>
+    <AssemblyVersion>1.0.67.0</AssemblyVersion>
+    <FileVersion>1.0.67.0</FileVersion>
+    <PackageProjectUrl>https://ftms.fpt.net</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/0xAndyNew/FTMS-FPT</RepositoryUrl>
   </PropertyGroup>
 
   <ItemGroup>
