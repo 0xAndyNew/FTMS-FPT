@@ -24,10 +24,10 @@
 ## 1. Tổng quan dự án
 
 - **Tên ứng dụng:** FTMS Companion
-- **Phiên bản:** `1.0.25`
+- **Phiên bản:** `1.0.67`
 - **Nền tảng:** Windows 10 / 11 (64-bit)
 - **Framework:** .NET 8 (WPF + WinForms Interop)
-- **Đơn vị phát triển:** FPT / FTI (FPT Telecom International)
+- **Đơn vị phát triển:** FPT Telecom International (Phòng TOC Data Center)
 - **Mục tiêu:**
   - Loại bỏ hoàn toàn độ trễ trong việc tiếp nhận thông tin yêu cầu hỗ trợ (YCHT / Ticket).
   - Tự động hóa cảnh báo sắp vi phạm SLA, ticket chưa có người nhận hoặc ticket có phản hồi mới từ khách hàng.
@@ -103,6 +103,11 @@
 - Khi bấm nút đóng cửa sổ (X) hoặc thu nhỏ cửa sổ, ứng dụng tự động chuyển mức tài nguyên của WebView2 Chromium sang `CoreWebView2MemoryUsageTargetLevel.Low`, giải phóng bộ nhớ RAM và tiếp tục gửi thông báo Telegram ngầm. Khi mở lại, mức tài nguyên tự động khôi phục `Normal`.
 - Menu chuột phải tại khay hệ thống hỗ trợ mở nhanh giao diện hoặc thoát hoàn toàn ứng dụng.
 - Tùy chọn tự động khởi động cùng Windows qua Registry `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+### 2.9. Hộp thoại thông tin (About Dialog) & Thẻ tag siêu dữ liệu bộ cài
+- Hộp thoại `AboutWindow` chuẩn hóa hiển thị biểu tượng, phiên bản, bản quyền đơn vị phát triển (FPT Telecom International - Phòng TOC Data Center) và tóm tắt 5 tính năng cốt lõi.
+- Tích hợp nút xem thông tin (About) trực quan ngay trên thanh công cụ chính (`CompactWindow`) và cửa sổ Cài đặt (`CompactSettingsWindow`).
+- Bộ cài đặt Inno Setup và tệp thực thi được gắn đầy đủ thẻ tag và siêu dữ liệu VersionInfo chuẩn Windows Explorer (Company, Product, Copyright, URLs, Description).
 
 ---
 
@@ -316,7 +321,7 @@ Hệ thống ưu tiên tối đa tính đúng đắn và tốc độ phát hiệ
 ## 7. Hướng dẫn cài đặt & Triển khai
 
 ### 7.1. Cài đặt người dùng cuối
-1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.24.exe`.
+1. Tải bộ cài đặt mới nhất: `dist/FTMS-Companion-Setup-1.0.67.exe` hoặc tải trực tiếp tại [GitHub Releases](https://github.com/0xAndyNew/FTMS-FPT/releases).
 2. Chạy file cài đặt với quyền Administrator (nếu máy chưa có WebView2 Runtime, bộ cài sẽ tự động tải và cài đặt Microsoft Edge WebView2 ngầm).
 3. Làm theo hướng dẫn trên màn hình để hoàn tất. Biểu tượng ứng dụng sẽ xuất hiện trong Start Menu và Desktop (nếu tùy chọn).
 
@@ -370,7 +375,7 @@ Chạy script PowerShell đi kèm để tự động publish single-file và đ�
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 ```
-Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.24.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
+Bộ cài đặt hoàn chỉnh `FTMS-Companion-Setup-1.0.67.exe` sẽ được tạo trong thư mục `D:\FTMS-FPT\dist`.
 
 ---
 
@@ -445,4 +450,4 @@ Thư mục này bao gồm:
 
 ---
 
-*Tài liệu được cập nhật tự động và kiểm tra toàn diện ngày 08/10/2026 cho phiên bản FTMS Companion 1.0.24.*
+*Tài liệu được cập nhật tự động và kiểm tra toàn diện cho phiên bản FTMS Companion 1.0.67.*

@@ -19,6 +19,7 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>..\..\picture\ftms-app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>FTMS.Companion</AssemblyName>
     <Product>FTMS Companion</Product>
     <Company>FPT Telecom International</Company>

@@ -789,6 +789,27 @@ public partial class CompactWindow : Window
         MarkUserActivity();
         new AboutWindow { Owner = this }.ShowDialog();
     }
+
+    private void OnMonitorTextClick(object sender, MouseButtonEventArgs e)
+    {
+        CopyCurrentLog();
+    }
+
+    private void CopyLogToClipboard(object sender, RoutedEventArgs e)
+    {
+        CopyCurrentLog();
+    }
+
+    private void CopyCurrentLog()
+    {
+        var text = MonitorText.Text;
+        if (string.IsNullOrWhiteSpace(text) || text == "Đang khởi tạo…") return;
+        try
+        {
+            System.Windows.Clipboard.SetText(text);
+        }
+        catch { }
+    }
     private void ScheduleVisibleNavigationRetry(CoreWebView2WebErrorStatus errorStatus)
     {
         _visibleRetryAttempts++;
